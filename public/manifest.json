@@ -1,0 +1,21 @@
+{
+  "name": "Flap Token Launcher",
+  "short_name": "Flap Launcher",
+  "description": "Launch your own token on Flap Protocol with bonding curve and auto DEX migration",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#030712",
+  "theme_color": "#4F46E5",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
