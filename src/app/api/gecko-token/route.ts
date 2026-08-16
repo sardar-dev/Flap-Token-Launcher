@@ -60,7 +60,7 @@ interface GeckoTokenInfoResponse {
 }
 
 const GECKO_BASE = "https://api.geckoterminal.com/api/v2";
-const MIN_VOLUME = 500;
+const MIN_VOLUME = 200;
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -69,6 +69,7 @@ export const maxDuration = 30;
 export async function GET(req: NextRequest) {
   try {
     const chainKey = req.nextUrl.searchParams.get("chain") || "BSC";
+    const directAddress = req.nextUrl.searchParams.get("address");
     const chainInfo = getChainByKey(chainKey);
 
     if (!chainInfo) {
@@ -88,6 +89,38 @@ export async function GET(req: NextRequest) {
     }
 
     const network = chainInfo.geckoNetwork;
+
+    // Direct lookup mode: used when the person clicks a specific token in the
+    // Trending Memecoins dashboard. We already have its name/symbol/price/
+    // volume from that dashboard fetch (no need to re-fetch those), so this
+    // only pulls the richer info (description, socials, higher-res image)
+    // for the ONE token that was clicked - one extra API call, not a rescan.
+    if (directAddress) {
+      const infoRes = await fetch(
+        `${GECKO_BASE}/networks/${network}/tokens/${directAddress}/info`,
+        { headers: { Accept: "application/json" }, next: { revalidate: 0 } }
+      );
+      if (!infoRes.ok) {
+        return NextResponse.json({ error: `Could not load details for this token (HTTP ${infoRes.status}).` }, { status: 502 });
+      }
+      const infoJson: GeckoTokenInfoResponse = await infoRes.json();
+      const attrs = infoJson.data.attributes;
+
+      return NextResponse.json({
+        success: true,
+        token: {
+          name: attrs.name,
+          symbol: attrs.symbol,
+          address: attrs.address,
+          description: attrs.description || "",
+          imageUrl: attrs.image?.large || attrs.image?.small || attrs.image?.thumb || attrs.image_url || "",
+          websites: attrs.websites || [],
+          twitter: attrs.twitter_handle || "",
+          telegram: attrs.telegram_handle || "",
+          chain: chainInfo.key,
+        },
+      });
+    }
 
     const allQualifying: Array<{
       pool: GeckoPool;

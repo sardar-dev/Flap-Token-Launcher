@@ -42,6 +42,18 @@ interface GeckoTokenData {
   poolName: string;
 }
 
+interface TrendingTokenCard {
+  address: string;
+  name: string;
+  symbol: string;
+  imageUrl: string;
+  priceUsd: number;
+  priceChange1h: number;
+  volume24h: number;
+  ageDays: number;
+  chain: string;
+}
+
 export default function LauncherForm({
   onLaunchComplete,
 }: {
@@ -104,25 +116,91 @@ export default function LauncherForm({
         return;
       }
 
-      const token: GeckoTokenData = data.token;
-
-      // Fill fields from AI data. Metadata CID is intentionally left as-is:
-      // there's no such thing as a valid "example" CID to borrow from another
-      // token, so it's generated for real (from imageUrl below) when you launch.
-      setName(token.name);
-      setSymbol(token.symbol);
-      setMetaCid("");
-      setDescription(token.description || `${token.name} - A trending token on ${selectedChain?.name ?? chain}`);
-      setImageUrl(token.imageUrl || "");
-      setWebsite(token.websites?.[0] || "");
-      setTwitter(token.twitter || "");
-      setTelegram(token.telegram || "");
-      
-      setAiToken(token);
+      fillFormFromToken(data.token);
     } catch (err: unknown) {
       setAiError(err instanceof Error ? err.message : "Network error");
     } finally {
       setAiFetching(false);
+    }
+  };
+
+  // Shared by both the AI Fill button and clicking a card in the Trending
+  // Memecoins dashboard below - same fields, same behavior.
+  const fillFormFromToken = (token: GeckoTokenData) => {
+    setName(token.name);
+    setSymbol(token.symbol);
+    setMetaCid("");
+    setDescription(token.description || `${token.name} - A trending token on ${selectedChain?.name ?? chain}`);
+    setImageUrl(token.imageUrl || "");
+    setWebsite(token.websites?.[0] || "");
+    setTwitter(token.twitter || "");
+    setTelegram(token.telegram || "");
+    setAiToken(token);
+  };
+
+  // --- Trending Memecoins dashboard ---
+  // Fetches ONLY when the person presses the Refresh button - never on a
+  // timer or on mount, to keep GeckoTerminal API usage (and hosting cost)
+  // to exactly one call per press.
+  const [trendingChain, setTrendingChain] = useState(chain);
+  const [trendingMode, setTrendingMode] = useState<"hot" | "new">("hot");
+  const [trendingTokens, setTrendingTokens] = useState<TrendingTokenCard[]>([]);
+  const [trendingLoading, setTrendingLoading] = useState(false);
+  const [trendingError, setTrendingError] = useState("");
+  const [trendingFetchedOnce, setTrendingFetchedOnce] = useState(false);
+  const [trendingFillingAddress, setTrendingFillingAddress] = useState<string | null>(null);
+
+  const handleFetchTrending = async () => {
+    setTrendingLoading(true);
+    setTrendingError("");
+    try {
+      const res = await fetch(
+        `/api/trending-tokens?chain=${encodeURIComponent(trendingChain)}&mode=${trendingMode}`
+      );
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        setTrendingError(data.error || "Failed to fetch trending tokens");
+        setTrendingTokens([]);
+      } else {
+        setTrendingTokens(data.tokens || []);
+      }
+    } catch (err: unknown) {
+      setTrendingError(err instanceof Error ? err.message : "Network error");
+    } finally {
+      setTrendingLoading(false);
+      setTrendingFetchedOnce(true);
+    }
+  };
+
+  const handleTrendingCardClick = async (card: TrendingTokenCard) => {
+    setTrendingFillingAddress(card.address);
+    setAiError("");
+    try {
+      const res = await fetch(
+        `/api/gecko-token?chain=${encodeURIComponent(card.chain)}&address=${encodeURIComponent(card.address)}`
+      );
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        setAiError(data.error || "Failed to load this token's details");
+        return;
+      }
+      // Combine the enrichment (description/socials/image) with the price
+      // and volume we already fetched for the dashboard card - no need to
+      // ask GeckoTerminal for those a second time.
+      const merged: GeckoTokenData = {
+        ...data.token,
+        volume24h: card.volume24h,
+        priceUsd: card.priceUsd,
+        fdv: null,
+        poolCreatedAt: "",
+        poolName: `${card.name}/${card.symbol}`,
+      };
+      if (chain !== card.chain) setChain(card.chain);
+      fillFormFromToken(merged);
+    } catch (err: unknown) {
+      setAiError(err instanceof Error ? err.message : "Network error");
+    } finally {
+      setTrendingFillingAddress(null);
     }
   };
 
@@ -212,7 +290,114 @@ export default function LauncherForm({
   };
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-6">
+    <>
+      {/* Trending Memecoins Dashboard */}
+      <div className="mb-6 rounded-xl border border-gray-800 bg-gray-900/60 p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <p className="flex items-center gap-1.5 text-sm font-bold text-white">
+              🔥 Trending Memecoins
+            </p>
+            <p className="text-[11px] text-gray-500">Click a token to fill the form below</p>
+          </div>
+          <button
+            type="button"
+            onClick={handleFetchTrending}
+            disabled={trendingLoading}
+            className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-bold transition-all ${
+              trendingLoading
+                ? "cursor-not-allowed bg-gray-700 text-gray-500"
+                : "bg-gray-800 text-gray-200 hover:bg-gray-700"
+            }`}
+          >
+            {trendingLoading ? "Fetching..." : trendingFetchedOnce ? "🔄 Refresh" : "📡 Fetch Trending"}
+          </button>
+        </div>
+
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <select
+            value={trendingChain}
+            onChange={(e) => setTrendingChain(e.target.value)}
+            className="rounded-md border border-gray-700 bg-gray-800/60 px-2.5 py-1.5 text-xs text-white outline-none focus:border-indigo-500"
+          >
+            {SUPPORTED_CHAINS.filter((c) => c.geckoNetwork).map((c) => (
+              <option key={c.key} value={c.key}>{c.name}</option>
+            ))}
+          </select>
+          <div className="flex overflow-hidden rounded-md border border-gray-700">
+            <button
+              type="button"
+              onClick={() => setTrendingMode("hot")}
+              className={`px-3 py-1.5 text-xs font-semibold transition ${
+                trendingMode === "hot" ? "bg-orange-600 text-white" : "bg-gray-800/60 text-gray-400 hover:text-gray-200"
+              }`}
+            >
+              🔥 Hot
+            </button>
+            <button
+              type="button"
+              onClick={() => setTrendingMode("new")}
+              className={`px-3 py-1.5 text-xs font-semibold transition ${
+                trendingMode === "new" ? "bg-indigo-600 text-white" : "bg-gray-800/60 text-gray-400 hover:text-gray-200"
+              }`}
+            >
+              🕐 New
+            </button>
+          </div>
+        </div>
+
+        {trendingError && (
+          <p className="mb-2 rounded-md border border-red-500/30 bg-red-950/30 px-3 py-2 text-xs text-red-300">
+            {trendingError}
+          </p>
+        )}
+
+        {!trendingFetchedOnce && !trendingLoading && !trendingError && (
+          <p className="rounded-md border border-dashed border-gray-800 px-3 py-4 text-center text-xs text-gray-500">
+            Press &quot;Fetch Trending&quot; to load tokens - this app never auto-refreshes, so nothing is fetched until you ask for it.
+          </p>
+        )}
+
+        {trendingTokens.length > 0 && (
+          <div className="flex gap-2 overflow-x-auto pb-1">
+            {trendingTokens.map((t) => (
+              <button
+                key={t.address}
+                type="button"
+                onClick={() => handleTrendingCardClick(t)}
+                disabled={trendingFillingAddress === t.address}
+                className="flex w-40 flex-shrink-0 flex-col items-start gap-1.5 rounded-lg border border-gray-800 bg-gray-950/60 p-3 text-left transition hover:border-indigo-500/50 hover:bg-gray-900 disabled:opacity-60"
+              >
+                <div className="flex w-full items-center gap-2">
+                  {t.imageUrl ? (
+                    <div className="relative h-7 w-7 flex-shrink-0 overflow-hidden rounded-full bg-gray-800">
+                      <Image src={t.imageUrl} alt={t.symbol} fill className="object-cover" unoptimized
+                        onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
+                    </div>
+                  ) : (
+                    <div className="h-7 w-7 flex-shrink-0 rounded-full bg-gray-800" />
+                  )}
+                  <span className="truncate text-xs font-bold text-white">{t.name}</span>
+                </div>
+                <p className="text-xs text-gray-300">
+                  ${t.priceUsd < 0.01 ? t.priceUsd.toPrecision(3) : t.priceUsd.toFixed(4)}
+                  <span className={`ml-1.5 ${t.priceChange1h >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                    {t.priceChange1h >= 0 ? "↗" : "↘"} {Math.abs(t.priceChange1h).toFixed(1)}% 1h
+                  </span>
+                </p>
+                <p className="text-[10px] text-gray-500">
+                  Vol: ${t.volume24h >= 1000 ? `${(t.volume24h / 1000).toFixed(1)}K` : t.volume24h.toFixed(0)} · {t.ageDays}d
+                </p>
+                {trendingFillingAddress === t.address && (
+                  <p className="text-[10px] text-indigo-400">Loading details...</p>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <form onSubmit={handleSubmit} className="space-y-6">
       {/* Chain Selection */}
       <div>
         <label className="mb-1 block text-xs font-semibold uppercase tracking-wider text-indigo-400">
@@ -754,5 +939,6 @@ export default function LauncherForm({
         </div>
       )}
     </form>
+    </>
   );
 }
