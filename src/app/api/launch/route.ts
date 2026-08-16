@@ -180,21 +180,43 @@ function uint8ToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-async function fetchImageAsFile(imageUrl: string, symbol: string): Promise<File | null> {
+async function fetchImageAsFile(imageUrl: string, symbol: string): Promise<{ file: File | null; error: string | null }> {
   const imageRes = await fetch(imageUrl, {
     headers: {
       Accept: "image/avif,image/webp,image/png,image/jpeg,image/gif,image/svg+xml,image/*,*/*;q=0.8",
       "User-Agent": "Flap-Token-Launcher/1.0",
     },
   });
-  if (!imageRes.ok) return null;
+  if (!imageRes.ok) {
+    return { file: null, error: `Could not fetch image URL: HTTP ${imageRes.status} ${imageRes.statusText}` };
+  }
 
   const mime = normalizeImageMime(imageRes.headers.get("content-type"));
   const arrayBuffer = await imageRes.arrayBuffer();
-  return new File([arrayBuffer], `${symbol || "token"}.${extensionFromMime(mime)}`, { type: mime });
+
+  // Guard against obviously-broken fetches (e.g. an HTML error page served
+  // with an image/* content-type) and oversized files that upload APIs
+  // commonly reject outright.
+  if (arrayBuffer.byteLength < 100) {
+    return { file: null, error: `Fetched image is only ${arrayBuffer.byteLength} bytes - likely not a real image (check the URL is a direct image link, not a webpage).` };
+  }
+  const MAX_BYTES = 10 * 1024 * 1024;
+  if (arrayBuffer.byteLength > MAX_BYTES) {
+    return { file: null, error: `Image is ${(arrayBuffer.byteLength / 1024 / 1024).toFixed(1)}MB, over the ${MAX_BYTES / 1024 / 1024}MB guard - use a smaller image.` };
+  }
+
+  const file = new File([arrayBuffer], `${symbol || "token"}.${extensionFromMime(mime)}`, { type: mime });
+  return { file, error: null };
 }
 
 // Upload image + metadata to Flap's real IPFS pinning API (see FLAP_UPLOAD_ENDPOINT above).
+//
+// NOTE: this deliberately does NOT use the SDK's bundled `uploadTokenMeta` helper.
+// That helper only throws `res.statusText`, discarding the actual response body -
+// which is exactly where a GraphQL API puts the real reason a request failed
+// (a validation error, a malformed field, a WAF/CDN challenge page, etc). We
+// build the same multipart GraphQL request by hand so any failure logs the
+// real server response and is actually diagnosable from your run logs.
 async function uploadMetadataToFlap(params: {
   file: File;
   name: string;
@@ -206,26 +228,82 @@ async function uploadMetadataToFlap(params: {
   telegram?: string;
 }): Promise<{ cid: string | null; error: string | null }> {
   try {
-    const { uploadTokenMeta } = await import("four-flap-meme-sdk");
-    const cid = await uploadTokenMeta(
-      params.file,
-      {
-        // A short invisible nonce keeps each upload's metadata content unique,
-        // so retries (or two launches with the same image/description) never
-        // collide on the same content-addressed CID and hit Flap's
-        // MetaAlreadyUsedByOtherToken error.
-        description: `${params.description || `${params.name} token deployed via Flap Token Launcher`}\u200b`.slice(0, 500) + ` \u200b${Date.now().toString(36)}`,
-        creator: params.creator,
-        website: params.website || null,
-        twitter: params.twitter || null,
-        telegram: params.telegram || null,
-      },
-      FLAP_UPLOAD_ENDPOINT
+    const MUTATION_CREATE = `mutation Create($file: Upload!, $meta: MetadataInput!) { create(file: $file, meta: $meta) }`;
+
+    // A short invisible nonce keeps each upload's metadata content unique, so
+    // retries (or two launches with the same image/description) never
+    // collide on the same content-addressed CID and hit Flap's
+    // MetaAlreadyUsedByOtherToken error.
+    const uniqueDescription =
+      `${params.description || `${params.name} token deployed via Flap Token Launcher`}`.slice(0, 480) +
+      ` \u200b${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
+    const form = new FormData();
+    form.append(
+      "operations",
+      JSON.stringify({
+        query: MUTATION_CREATE,
+        variables: {
+          file: null,
+          meta: {
+            website: params.website || null,
+            twitter: params.twitter || null,
+            telegram: params.telegram || null,
+            description: uniqueDescription,
+            creator: params.creator,
+          },
+        },
+      })
     );
+    form.append("map", JSON.stringify({ "0": ["variables.file"] }));
+    form.append("0", params.file, params.file.name);
+
+    const res = await fetch(FLAP_UPLOAD_ENDPOINT, {
+      method: "POST",
+      // funcs.flap.sh is the same endpoint flap.sh's own frontend calls when you
+      // upload an image there - some CDNs/WAFs in front of internal-looking
+      // endpoints like this treat requests without an Origin/Referer or a
+      // browser-like User-Agent as bot traffic and silently reject them, which
+      // shows up as a generic non-2xx or an HTML challenge page rather than a
+      // GraphQL error. Sending the same headers a browser tab on flap.sh would
+      // send costs nothing and rules this out.
+      headers: {
+        Origin: "https://flap.sh",
+        Referer: "https://flap.sh/",
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      },
+      body: form,
+    });
+    const rawBody = await res.text();
+
+    if (!res.ok) {
+      return {
+        cid: null,
+        error: `HTTP ${res.status} ${res.statusText} from ${FLAP_UPLOAD_ENDPOINT}: ${rawBody.slice(0, 400)}`,
+      };
+    }
+
+    let json: { data?: { create?: string }; errors?: Array<{ message?: string }> };
+    try {
+      json = JSON.parse(rawBody);
+    } catch {
+      return {
+        cid: null,
+        error: `Non-JSON response from ${FLAP_UPLOAD_ENDPOINT} (HTTP ${res.status}): ${rawBody.slice(0, 400)}`,
+      };
+    }
+
+    if (json.errors && json.errors.length > 0) {
+      return { cid: null, error: `GraphQL error: ${json.errors.map((e) => e.message).join("; ")}` };
+    }
+
+    const cid = json.data?.create;
     if (typeof cid === "string" && cid.length > 0) return { cid, error: null };
-    return { cid: null, error: "Flap upload API returned an empty CID" };
+
+    return { cid: null, error: `Upload succeeded (HTTP ${res.status}) but response had no CID: ${rawBody.slice(0, 400)}` };
   } catch (error) {
-    return { cid: null, error: error instanceof Error ? error.message : String(error) };
+    return { cid: null, error: error instanceof Error ? `${error.name}: ${error.message}` : String(error) };
   }
 }
 
@@ -414,10 +492,10 @@ export async function POST(req: NextRequest) {
 
     if (imageUrl) {
       addLog(requestLogs, "🖼️ Fetching image...");
-      const file = await fetchImageAsFile(imageUrl, symbol);
+      const { file, error: fetchError } = await fetchImageAsFile(imageUrl, symbol);
 
       if (!file) {
-        addLog(requestLogs, "❌ Could not fetch the image from the provided URL.");
+        addLog(requestLogs, `❌ Could not fetch the image from the provided URL: ${fetchError}`);
       } else {
         addLog(requestLogs, "📌 Pinning image + metadata to Flap's IPFS API (funcs.flap.sh)...");
         const flapResult = await uploadMetadataToFlap({
@@ -479,6 +557,10 @@ export async function POST(req: NextRequest) {
 
     if (finalMetaCid) {
       addLog(requestLogs, `📦 Using metadata CID: ${finalMetaCid}`);
+      addLog(
+        requestLogs,
+        `🔎 Verify it resolves before/while trading opens: https://ipfs.io/ipfs/${finalMetaCid} (if this 404s, the image genuinely didn't pin - if it loads fine but flap.sh still shows no image, it's very likely just their indexer/CDN warm-up delay, not a launcher bug)`
+      );
     } else {
       addLog(
         requestLogs,
