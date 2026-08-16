@@ -16,9 +16,14 @@ interface LaunchResult {
   tokenAddress?: string;
   imageUrl?: string;
   chain?: string;
+  currency?: string;
   error?: string;
   logs?: string[];
   method?: string;
+  balanceBeforeNative?: number;
+  balanceAfterNative?: number;
+  costNative?: number;
+  nativeUsdPrice?: number | null;
 }
 
 interface GeckoTokenData {
@@ -50,13 +55,14 @@ export default function LauncherForm({
   const [metaCid, setMetaCid] = useState("");
   const [dexThresh, setDexThresh] = useState(1);
   const [migratorType, setMigratorType] = useState(1);
-  const [taxRate, setTaxRate] = useState("0");
+  const [taxRate, setTaxRate] = useState("200"); // Default 2% (200 bps)
   const [initialBuy, setInitialBuy] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<LaunchResult | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [copySuccess, setCopySuccess] = useState(false);
+  const [caCopySuccess, setCaCopySuccess] = useState(false);
 
   // Token image & metadata
   const [imageUrl, setImageUrl] = useState("");
@@ -135,6 +141,23 @@ export default function LauncherForm({
       document.body.removeChild(textarea);
       setCopySuccess(true);
       setTimeout(() => setCopySuccess(false), 2000);
+    }
+  };
+
+  const handleCopyAddress = async (address: string) => {
+    try {
+      await navigator.clipboard.writeText(address);
+      setCaCopySuccess(true);
+      setTimeout(() => setCaCopySuccess(false), 2000);
+    } catch {
+      const textarea = document.createElement("textarea");
+      textarea.value = address;
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      document.body.removeChild(textarea);
+      setCaCopySuccess(true);
+      setTimeout(() => setCaCopySuccess(false), 2000);
     }
   };
 
@@ -659,7 +682,7 @@ export default function LauncherForm({
                   </p>
                   <div className="mt-2 space-y-1 text-sm">
                     {result.tokenAddress && (
-                      <p>
+                      <p className="flex flex-wrap items-center gap-1.5">
                         <span className="text-gray-400">Token:</span>{" "}
                         {result.chain && selectedChain ? (
                           <a
@@ -673,6 +696,17 @@ export default function LauncherForm({
                         ) : (
                           <span className="font-mono text-xs">{result.tokenAddress}</span>
                         )}
+                        <button
+                          type="button"
+                          onClick={() => handleCopyAddress(result.tokenAddress!)}
+                          className={`rounded px-1.5 py-0.5 text-[11px] font-medium transition-all ${
+                            caCopySuccess
+                              ? "bg-emerald-500/20 text-emerald-300"
+                              : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+                          }`}
+                        >
+                          {caCopySuccess ? "✅ Copied" : "📋 Copy"}
+                        </button>
                       </p>
                     )}
                     <p><span className="text-gray-400">Method:</span> <span className="font-mono text-xs text-indigo-400">{result.method}</span></p>
@@ -686,6 +720,28 @@ export default function LauncherForm({
                         <span className="font-mono text-xs">{result.txHash}</span>
                       )}
                     </p>
+                    {result.balanceBeforeNative !== undefined && result.balanceAfterNative !== undefined && (
+                      <div className="mt-2 space-y-0.5 border-t border-emerald-500/20 pt-2 text-xs text-gray-400">
+                        <p>
+                          Balance before: <span className="text-gray-200">{result.balanceBeforeNative.toFixed(6)} {result.currency}</span>
+                          {result.nativeUsdPrice != null && (
+                            <span className="text-gray-500"> (~${(result.balanceBeforeNative * result.nativeUsdPrice).toFixed(2)})</span>
+                          )}
+                        </p>
+                        <p>
+                          Balance after: <span className="text-gray-200">{result.balanceAfterNative.toFixed(6)} {result.currency}</span>
+                          {result.nativeUsdPrice != null && (
+                            <span className="text-gray-500"> (~${(result.balanceAfterNative * result.nativeUsdPrice).toFixed(2)})</span>
+                          )}
+                        </p>
+                        <p>
+                          Cost of this launch: <span className="text-amber-400">{result.costNative?.toFixed(6)} {result.currency}</span>
+                          {result.nativeUsdPrice != null && result.costNative !== undefined && (
+                            <span className="text-gray-500"> (~${(result.costNative * result.nativeUsdPrice).toFixed(2)})</span>
+                          )}
+                        </p>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>

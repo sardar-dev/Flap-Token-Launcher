@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getChainByKey } from "@/lib/chains";
 
 export const runtime = "nodejs";
 // Vanity-salt search + IPFS pinning can take up to ~60s; raise the Vercel
@@ -471,12 +472,36 @@ export async function POST(req: NextRequest) {
     const connectedWallet = wallet.connect(provider);
 
     addLog(requestLogs, "💰 Checking balance...");
-    const balance = await provider.getBalance(deployerAddress);
-    const balanceEth = Number(balance) / 1e18;
-    const currency = chain === "BSC" ? "BNB" : "ETH";
-    addLog(requestLogs, `💰 Balance: ${balanceEth.toFixed(6)} ${currency}`);
+    const balanceBeforeWei = await provider.getBalance(deployerAddress);
+    const balanceBeforeNative = Number(balanceBeforeWei) / 1e18;
+    const chainInfo = getChainByKey(chain);
+    const currency = chainInfo?.currency || "ETH";
 
-    if (balance === BigInt(0)) {
+    // Best-effort USD price for the native coin, used only to show a
+    // before/after USD estimate - never blocks the launch if it fails.
+    let nativeUsdPrice: number | null = null;
+    if (chainInfo?.coingeckoId) {
+      try {
+        const priceRes = await fetch(
+          `https://api.coingecko.com/api/v3/simple/price?ids=${chainInfo.coingeckoId}&vs_currencies=usd`,
+          { headers: { Accept: "application/json" } }
+        );
+        if (priceRes.ok) {
+          const priceJson = await priceRes.json();
+          const p = priceJson?.[chainInfo.coingeckoId]?.usd;
+          if (typeof p === "number") nativeUsdPrice = p;
+        }
+      } catch {
+        // Price is a nice-to-have for the summary, not required to launch.
+      }
+    }
+
+    const fmtUsd = (nativeAmt: number) =>
+      nativeUsdPrice !== null ? ` (~$${(nativeAmt * nativeUsdPrice).toFixed(2)})` : "";
+
+    addLog(requestLogs, `💰 Balance: ${balanceBeforeNative.toFixed(6)} ${currency}${fmtUsd(balanceBeforeNative)}`);
+
+    if (balanceBeforeWei === BigInt(0)) {
       throw new Error("Wallet has zero balance.");
     }
 
@@ -690,6 +715,21 @@ export async function POST(req: NextRequest) {
     addLog(requestLogs, `📋 TX: ${txHash}`);
     addLog(requestLogs, `🏷️ Token: ${saltResult.address}`);
     addLog(requestLogs, `🎯 Method: ${successMethod}`);
+
+    // Balance after, and what this launch actually cost (gas + any initial buy).
+    const balanceAfterWei = await provider.getBalance(deployerAddress);
+    const balanceAfterNative = Number(balanceAfterWei) / 1e18;
+    const costNative = balanceBeforeNative - balanceAfterNative;
+    addLog(
+      requestLogs,
+      `💰 Balance before: ${balanceBeforeNative.toFixed(6)} ${currency}${fmtUsd(balanceBeforeNative)}`
+    );
+    addLog(
+      requestLogs,
+      `💰 Balance after: ${balanceAfterNative.toFixed(6)} ${currency}${fmtUsd(balanceAfterNative)}`
+    );
+    addLog(requestLogs, `💸 Cost of this launch: ${costNative.toFixed(6)} ${currency}${fmtUsd(costNative)}`);
+
     addLog(requestLogs, "🎉 Token deployed successfully!");
 
     return NextResponse.json({
@@ -700,7 +740,12 @@ export async function POST(req: NextRequest) {
       imageUrl: finalImageUrl,
       metaCid: finalMetaCid,
       chain,
+      currency,
       method: successMethod,
+      balanceBeforeNative,
+      balanceAfterNative,
+      costNative,
+      nativeUsdPrice,
       logs: requestLogs,
     });
   } catch (error: unknown) {

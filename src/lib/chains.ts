@@ -12,6 +12,13 @@ export interface ChainInfo {
    * so AI Fill is disabled for it rather than silently falling back to BSC.
    */
   geckoNetwork: string | null;
+  /**
+   * CoinGecko "id" for this chain's native coin, used to fetch a USD price
+   * (https://api.coingecko.com/api/v3/simple/price?ids=<id>&vs_currencies=usd).
+   * `null` means no reliable price id is available (e.g. a very new chain) -
+   * in that case only the native-coin amount is shown, no USD conversion.
+   */
+  coingeckoId: string | null;
 }
 
 export const SUPPORTED_CHAINS: ChainInfo[] = [
@@ -23,6 +30,7 @@ export const SUPPORTED_CHAINS: ChainInfo[] = [
     explorer: "https://bscscan.com",
     explorerTx: (h) => `https://bscscan.com/tx/${h}`,
     geckoNetwork: "bsc",
+    coingeckoId: "binancecoin",
   },
   {
     key: "BASE",
@@ -32,6 +40,7 @@ export const SUPPORTED_CHAINS: ChainInfo[] = [
     explorer: "https://basescan.org",
     explorerTx: (h) => `https://basescan.org/tx/${h}`,
     geckoNetwork: "base",
+    coingeckoId: "ethereum",
   },
   {
     key: "ETHEREUM",
@@ -41,6 +50,7 @@ export const SUPPORTED_CHAINS: ChainInfo[] = [
     explorer: "https://etherscan.io",
     explorerTx: (h) => `https://etherscan.io/tx/${h}`,
     geckoNetwork: "eth",
+    coingeckoId: "ethereum",
   },
   {
     key: "ARBITRUM_ONE",
@@ -50,6 +60,7 @@ export const SUPPORTED_CHAINS: ChainInfo[] = [
     explorer: "https://arbiscan.io",
     explorerTx: (h) => `https://arbiscan.io/tx/${h}`,
     geckoNetwork: "arbitrum",
+    coingeckoId: "ethereum",
   },
   {
     key: "XLAYER",
@@ -59,6 +70,7 @@ export const SUPPORTED_CHAINS: ChainInfo[] = [
     explorer: "https://www.okx.com/explorer/xlayer",
     explorerTx: (h) => `https://www.okx.com/explorer/xlayer/tx/${h}`,
     geckoNetwork: "x-layer",
+    coingeckoId: "okb",
   },
   {
     key: "MORPH",
@@ -68,6 +80,7 @@ export const SUPPORTED_CHAINS: ChainInfo[] = [
     explorer: "https://explorer.morphl2.io",
     explorerTx: (h) => `https://explorer.morphl2.io/tx/${h}`,
     geckoNetwork: "morph-l2",
+    coingeckoId: "ethereum",
   },
   {
     key: "MONAD",
@@ -79,6 +92,9 @@ export const SUPPORTED_CHAINS: ChainInfo[] = [
     // GeckoTerminal's Monad mainnet slug is new and can change - verify at
     // https://api.geckoterminal.com/api/v2/networks if AI Fill errors on Monad.
     geckoNetwork: "monad",
+    // No established CoinGecko id yet for Monad's native MON coin as of writing -
+    // leave null so the app shows the coin amount only, no fabricated USD figure.
+    coingeckoId: null,
   },
 ];
 
