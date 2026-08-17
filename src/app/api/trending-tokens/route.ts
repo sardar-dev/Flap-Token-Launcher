@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getChainByKey } from "@/lib/chains";
+import { getChainByKey, GECKOTERMINAL_API_BASE } from "@/lib/chains";
+
+// NOTE: as of this update, the primary path for the Trending Memecoins
+// dashboard is src/lib/geckoterminal-client.ts, which calls GeckoTerminal
+// directly from the visitor's browser. This route now exists as the
+// automatic fallback for when that direct call fails.
 
 interface GeckoPoolAttributes {
   name: string;
@@ -29,7 +34,6 @@ interface GeckoToken {
   attributes: GeckoTokenAttributes;
 }
 
-const GECKO_BASE = "https://api.geckoterminal.com/api/v2";
 const MAX_CARDS = 12;
 
 export const dynamic = "force-dynamic";
@@ -58,8 +62,8 @@ export async function GET(req: NextRequest) {
     const network = chainInfo.geckoNetwork;
     const url =
       mode === "hot"
-        ? `${GECKO_BASE}/networks/${network}/trending_pools?include=base_token`
-        : `${GECKO_BASE}/networks/${network}/new_pools?include=base_token&page=1`;
+        ? `${GECKOTERMINAL_API_BASE}/networks/${network}/trending_pools?include=base_token`
+        : `${GECKOTERMINAL_API_BASE}/networks/${network}/new_pools?include=base_token&page=1`;
 
     const res = await fetch(url, { headers: { Accept: "application/json" }, next: { revalidate: 0 } });
     if (!res.ok) {

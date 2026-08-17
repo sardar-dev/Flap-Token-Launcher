@@ -8,6 +8,8 @@ import {
   MIGRATOR_OPTIONS,
   getChainByKey,
 } from "@/lib/chains";
+import type { GeckoTokenData, TrendingTokenCard } from "@/lib/gecko-types";
+import { fetchAiFillToken, fetchTokenInfoByAddress, fetchTrendingTokens } from "@/lib/geckoterminal-client";
 
 interface LaunchResult {
   success: boolean;
@@ -26,32 +28,13 @@ interface LaunchResult {
   nativeUsdPrice?: number | null;
 }
 
-interface GeckoTokenData {
+interface LaunchHistoryEntry {
   name: string;
   symbol: string;
-  address: string;
-  description: string;
-  imageUrl: string;
-  websites: string[];
-  twitter: string;
-  telegram: string;
-  volume24h: number;
-  priceUsd: number;
-  fdv: number | null;
-  poolCreatedAt: string;
-  poolName: string;
-}
-
-interface TrendingTokenCard {
-  address: string;
-  name: string;
-  symbol: string;
-  imageUrl: string;
-  priceUsd: number;
-  priceChange1h: number;
-  volume24h: number;
-  ageDays: number;
   chain: string;
+  tokenAddress: string;
+  txHash: string;
+  timestamp: number;
 }
 
 export default function LauncherForm({
@@ -95,6 +78,95 @@ export default function LauncherForm({
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs]);
 
+  // --- Remember last used chain (browser only, nothing sent to server) ---
+  const LAST_CHAIN_KEY = "flap_last_chain";
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(LAST_CHAIN_KEY);
+      if (saved && getChainByKey(saved)) {
+        // Restoring browser-only state (localStorage) after mount is exactly
+        // what this effect is for; doing it in the initializer instead would
+        // cause a server/client hydration mismatch since localStorage doesn't
+        // exist during SSR.
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setChain(saved);
+        const c = getChainByKey(saved);
+        if (c) setRpcUrl(c.rpcUrl);
+      }
+    } catch {
+      // localStorage unavailable (private browsing, etc) - just use the default chain.
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LAST_CHAIN_KEY, chain);
+    } catch {
+      // Non-fatal - just means the chain won't be remembered next visit.
+    }
+  }, [chain]);
+
+  // --- Launch history (browser only, nothing sent to or stored on the server) ---
+  const HISTORY_KEY = "flap_launch_history";
+  const MAX_HISTORY_ENTRIES = 50;
+  const [history, setHistory] = useState<LaunchHistoryEntry[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(HISTORY_KEY);
+      // Restoring saved history from localStorage after mount, same as above.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      if (raw) setHistory(JSON.parse(raw));
+    } catch {
+      // Corrupt or unavailable storage - just start with an empty history.
+    }
+  }, []);
+
+  const addToHistory = (entry: LaunchHistoryEntry) => {
+    setHistory((prev) => {
+      const next = [entry, ...prev].slice(0, MAX_HISTORY_ENTRIES);
+      try {
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
+      } catch {
+        // Non-fatal - the entry just won't persist across reloads.
+      }
+      return next;
+    });
+  };
+
+  const clearHistory = () => {
+    setHistory([]);
+    try {
+      localStorage.removeItem(HISTORY_KEY);
+    } catch {
+      // Nothing to do if storage isn't available.
+    }
+  };
+
+  // --- 30-second cooldown after a successful launch, purely client-side ---
+  // No server calls or requests of any kind - just a countdown timer running
+  // in the browser that disables the Launch button until it reaches zero.
+  const [cooldownUntil, setCooldownUntil] = useState<number | null>(null);
+  const [cooldownRemaining, setCooldownRemaining] = useState(0);
+
+  useEffect(() => {
+    if (!cooldownUntil) {
+      // This effect's whole job is deriving cooldownRemaining from cooldownUntil.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setCooldownRemaining(0);
+      return;
+    }
+    const tick = () => {
+      const remaining = Math.max(0, Math.ceil((cooldownUntil - Date.now()) / 1000));
+      setCooldownRemaining(remaining);
+      if (remaining <= 0) setCooldownUntil(null);
+    };
+    tick();
+    const id = setInterval(tick, 250);
+    return () => clearInterval(id);
+  }, [cooldownUntil]);
+
   const handleChainChange = useCallback((newChain: string) => {
     setChain(newChain);
     const c = getChainByKey(newChain);
@@ -107,16 +179,11 @@ export default function LauncherForm({
     setAiToken(null);
 
     try {
-      // Scans the currently selected target chain, not always BSC
-      const res = await fetch(`/api/gecko-token?chain=${encodeURIComponent(chain)}`);
-      const data = await res.json();
-
-      if (!res.ok || !data.success) {
-        setAiError(data.error || "Failed to fetch token data");
-        return;
-      }
-
-      fillFormFromToken(data.token);
+      // Scans the currently selected target chain, not always BSC. Calls
+      // GeckoTerminal directly from this browser (falls back to our server
+      // route automatically if that's ever blocked).
+      const token = await fetchAiFillToken(chain);
+      fillFormFromToken(token);
     } catch (err: unknown) {
       setAiError(err instanceof Error ? err.message : "Network error");
     } finally {
@@ -154,18 +221,11 @@ export default function LauncherForm({
     setTrendingLoading(true);
     setTrendingError("");
     try {
-      const res = await fetch(
-        `/api/trending-tokens?chain=${encodeURIComponent(trendingChain)}&mode=${trendingMode}`
-      );
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        setTrendingError(data.error || "Failed to fetch trending tokens");
-        setTrendingTokens([]);
-      } else {
-        setTrendingTokens(data.tokens || []);
-      }
+      const tokens = await fetchTrendingTokens(trendingChain, trendingMode);
+      setTrendingTokens(tokens);
     } catch (err: unknown) {
-      setTrendingError(err instanceof Error ? err.message : "Network error");
+      setTrendingError(err instanceof Error ? err.message : "Failed to fetch trending tokens");
+      setTrendingTokens([]);
     } finally {
       setTrendingLoading(false);
       setTrendingFetchedOnce(true);
@@ -176,19 +236,12 @@ export default function LauncherForm({
     setTrendingFillingAddress(card.address);
     setAiError("");
     try {
-      const res = await fetch(
-        `/api/gecko-token?chain=${encodeURIComponent(card.chain)}&address=${encodeURIComponent(card.address)}`
-      );
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        setAiError(data.error || "Failed to load this token's details");
-        return;
-      }
+      const enrichedToken = await fetchTokenInfoByAddress(card.chain, card.address);
       // Combine the enrichment (description/socials/image) with the price
       // and volume we already fetched for the dashboard card - no need to
       // ask GeckoTerminal for those a second time.
       const merged: GeckoTokenData = {
-        ...data.token,
+        ...enrichedToken,
         volume24h: card.volume24h,
         priceUsd: card.priceUsd,
         fdv: null,
@@ -241,6 +294,7 @@ export default function LauncherForm({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (cooldownRemaining > 0) return; // extra guard alongside the disabled button
     setLoading(true);
     setResult(null);
     setLogs(["[Starting] Flap Token Launcher..."]);
@@ -276,6 +330,15 @@ export default function LauncherForm({
 
       if (res.ok && data.success) {
         setResult({ success: true, ...data });
+        addToHistory({
+          name,
+          symbol,
+          chain: data.chain || chain,
+          tokenAddress: data.tokenAddress,
+          txHash: data.txHash,
+          timestamp: Date.now(),
+        });
+        setCooldownUntil(Date.now() + 30000);
         onLaunchComplete();
       } else {
         setResult({ success: false, error: data.error, logs: data.logs });
@@ -291,6 +354,70 @@ export default function LauncherForm({
 
   return (
     <>
+      {/* Launch History (browser only - nothing saved on the server) */}
+      <div className="mb-4 flex items-center justify-between">
+        <button
+          type="button"
+          onClick={() => setShowHistory((v) => !v)}
+          className="flex items-center gap-1.5 rounded-md border border-gray-800 bg-gray-900/60 px-3 py-1.5 text-xs font-semibold text-gray-300 hover:bg-gray-800"
+        >
+          📜 Launch History {history.length > 0 && `(${history.length})`}
+          <span className="text-gray-500">{showHistory ? "▲" : "▼"}</span>
+        </button>
+      </div>
+
+      {showHistory && (
+        <div className="mb-6 rounded-xl border border-gray-800 bg-gray-900/60 p-4">
+          <div className="mb-2 flex items-center justify-between">
+            <p className="text-xs text-gray-500">
+              Saved only in this browser - never sent to or stored on any server.
+            </p>
+            {history.length > 0 && (
+              <button
+                type="button"
+                onClick={clearHistory}
+                className="text-xs font-medium text-red-400 hover:text-red-300"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+          {history.length === 0 ? (
+            <p className="rounded-md border border-dashed border-gray-800 px-3 py-4 text-center text-xs text-gray-500">
+              No tokens launched yet in this browser.
+            </p>
+          ) : (
+            <div className="max-h-64 space-y-2 overflow-y-auto">
+              {history.map((h, i) => {
+                const c = getChainByKey(h.chain);
+                return (
+                  <div key={`${h.txHash}-${i}`} className="flex items-center justify-between rounded-md border border-gray-800 bg-gray-950/60 px-3 py-2 text-xs">
+                    <div className="min-w-0">
+                      <p className="truncate font-semibold text-white">
+                        {h.name} <span className="text-gray-500">${h.symbol}</span>
+                      </p>
+                      <p className="text-[10px] text-gray-500">
+                        {c?.name || h.chain} · {new Date(h.timestamp).toLocaleString()}
+                      </p>
+                    </div>
+                    {c && (
+                      <a
+                        href={`${c.explorer}/token/${h.tokenAddress}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="ml-2 flex-shrink-0 text-indigo-400 underline hover:text-indigo-300"
+                      >
+                        View ↗
+                      </a>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Trending Memecoins Dashboard */}
       <div className="mb-6 rounded-xl border border-gray-800 bg-gray-900/60 p-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -768,9 +895,9 @@ export default function LauncherForm({
       {/* Submit Button */}
       <button
         type="submit"
-        disabled={loading}
+        disabled={loading || cooldownRemaining > 0}
         className={`relative w-full overflow-hidden rounded-xl px-6 py-4 text-base font-bold transition-all ${
-          loading
+          loading || cooldownRemaining > 0
             ? "cursor-not-allowed bg-gray-700 text-gray-400"
             : "bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:shadow-indigo-500/40 hover:brightness-110"
         }`}
@@ -782,6 +909,10 @@ export default function LauncherForm({
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
             </svg>
             Deploying...
+          </span>
+        ) : cooldownRemaining > 0 ? (
+          <span className="flex items-center justify-center gap-2">
+            ⏳ Wait {cooldownRemaining}s before launching another
           </span>
         ) : (
           <span className="flex items-center justify-center gap-2">

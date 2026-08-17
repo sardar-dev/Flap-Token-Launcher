@@ -1,5 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getChainByKey } from "@/lib/chains";
+import { getChainByKey, AI_FILL_MIN_VOLUME_USD, GECKOTERMINAL_API_BASE } from "@/lib/chains";
+
+// NOTE: as of this update, the primary path for AI Fill is
+// src/lib/geckoterminal-client.ts, which calls GeckoTerminal directly from
+// the visitor's browser (so each visitor gets their own rate-limit budget
+// instead of sharing this server's). This route now exists as the
+// automatic fallback for when that direct call fails.
 
 interface GeckoPoolAttributes {
   name: string;
@@ -59,9 +65,6 @@ interface GeckoTokenInfoResponse {
   };
 }
 
-const GECKO_BASE = "https://api.geckoterminal.com/api/v2";
-const MIN_VOLUME = 200;
-
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -97,7 +100,7 @@ export async function GET(req: NextRequest) {
     // for the ONE token that was clicked - one extra API call, not a rescan.
     if (directAddress) {
       const infoRes = await fetch(
-        `${GECKO_BASE}/networks/${network}/tokens/${directAddress}/info`,
+        `${GECKOTERMINAL_API_BASE}/networks/${network}/tokens/${directAddress}/info`,
         { headers: { Accept: "application/json" }, next: { revalidate: 0 } }
       );
       if (!infoRes.ok) {
@@ -129,7 +132,7 @@ export async function GET(req: NextRequest) {
 
     // Scan pages for qualifying tokens - always on the currently selected chain's network
     for (let page = 1; page <= 3; page++) {
-      const url = `${GECKO_BASE}/networks/${network}/new_pools?include=base_token&page=${page}`;
+      const url = `${GECKOTERMINAL_API_BASE}/networks/${network}/new_pools?include=base_token&page=${page}`;
       const res = await fetch(url, {
         headers: { Accept: "application/json" },
         next: { revalidate: 0 },
@@ -148,7 +151,7 @@ export async function GET(req: NextRequest) {
 
       for (const pool of pools) {
         const vol24 = parseFloat(pool.attributes.volume_usd?.h24 || "0");
-        if (vol24 >= MIN_VOLUME) {
+        if (vol24 >= AI_FILL_MIN_VOLUME_USD) {
           const baseTokenId = pool.relationships.base_token.data.id;
           const token = tokenMap.get(baseTokenId);
           if (token) {
@@ -164,7 +167,7 @@ export async function GET(req: NextRequest) {
     if (allQualifying.length === 0) {
       return NextResponse.json(
         {
-          error: `No ${chainInfo.name} tokens found with $${MIN_VOLUME}+ volume right now. Try again or pick another chain.`,
+          error: `No ${chainInfo.name} tokens found with $${AI_FILL_MIN_VOLUME_USD}+ volume right now. Try again or pick another chain.`,
         },
         { status: 404 }
       );
@@ -187,7 +190,7 @@ export async function GET(req: NextRequest) {
 
     try {
       const infoRes = await fetch(
-        `${GECKO_BASE}/networks/${network}/tokens/${tokenAddress}/info`,
+        `${GECKOTERMINAL_API_BASE}/networks/${network}/tokens/${tokenAddress}/info`,
         {
           headers: { Accept: "application/json" },
           next: { revalidate: 0 },

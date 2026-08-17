@@ -116,3 +116,9 @@ export const MIGRATOR_OPTIONS = [
 export function getChainByKey(key: string): ChainInfo | undefined {
   return SUPPORTED_CHAINS.find((c) => c.key === key);
 }
+
+// Shared between the client-side GeckoTerminal calls (src/lib/geckoterminal-client.ts)
+// and their server-side fallback routes, so both apply the same filter.
+export const AI_FILL_MIN_VOLUME_USD = 200;
+
+export const GECKOTERMINAL_API_BASE = "https://api.geckoterminal.com/api/v2";
