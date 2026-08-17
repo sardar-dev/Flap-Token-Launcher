@@ -15,6 +15,7 @@ interface LaunchResult {
   success: boolean;
   txHash?: string;
   deployer?: string;
+  beneficiary?: string;
   tokenAddress?: string;
   imageUrl?: string;
   chain?: string;
@@ -44,7 +45,12 @@ export default function LauncherForm({
 }) {
   const [chain, setChain] = useState("BSC");
   const [rpcUrl, setRpcUrl] = useState("https://bsc-dataseed.binance.org");
-  const [privateKey, setPrivateKey] = useState("");
+  const [privateKey1, setPrivateKey1] = useState("");
+  const [privateKey2, setPrivateKey2] = useState("");
+  const [privateKey3, setPrivateKey3] = useState("");
+  const [privateKey4, setPrivateKey4] = useState("");
+  const [showBackupWallets, setShowBackupWallets] = useState(false);
+  const [beneficiary, setBeneficiary] = useState("");
   const [name, setName] = useState("");
   const [symbol, setSymbol] = useState("");
   const [metaCid, setMetaCid] = useState("");
@@ -306,7 +312,8 @@ export default function LauncherForm({
         body: JSON.stringify({
           chain,
           rpcUrl,
-          privateKey,
+          privateKeys: [privateKey1, privateKey2, privateKey3, privateKey4].filter((k) => k.trim().length > 0),
+          beneficiary: beneficiary.trim() || undefined,
           name,
           symbol,
           metaCid,
@@ -570,18 +577,18 @@ export default function LauncherForm({
         />
       </div>
 
-      {/* Private Key */}
+      {/* Private Keys - primary + up to 3 backup wallets */}
       <div>
         <label className="mb-1 block text-xs font-semibold uppercase tracking-wider text-gray-400">
           🔑 Deployer Private Key <span className="text-red-400">*</span>
         </label>
         <p className="mb-1.5 text-[11px] text-gray-500">
-          Your wallet key for signing the deployment (never stored, processed client-side)
+          Sent to the server only to sign and send this one transaction - never saved.
         </p>
         <input
           type="password"
-          value={privateKey}
-          onChange={(e) => setPrivateKey(e.target.value)}
+          value={privateKey1}
+          onChange={(e) => setPrivateKey1(e.target.value)}
           placeholder="0x..."
           className="w-full rounded-lg border border-gray-700 bg-gray-800/60 px-4 py-2.5 font-mono text-sm text-white placeholder-gray-500 outline-none transition focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/50"
           required
@@ -589,6 +596,53 @@ export default function LauncherForm({
         <p className="mt-1 text-[11px] text-amber-500">
           ⚠️ Use a dedicated deployment wallet with minimal funds
         </p>
+
+        <button
+          type="button"
+          onClick={() => setShowBackupWallets((v) => !v)}
+          className="mt-2 text-[11px] font-semibold text-indigo-400 hover:text-indigo-300"
+        >
+          {showBackupWallets ? "▲ Hide backup wallets" : "▼ + Add backup wallets (up to 3 more)"}
+        </button>
+
+        {showBackupWallets && (
+          <div className="mt-2 space-y-2 rounded-lg border border-gray-800 bg-gray-950/40 p-3">
+            <p className="text-[11px] text-gray-500">
+              If wallet #1 fails (e.g. Flap&apos;s per-wallet rate limit), the launch automatically retries with #2, then #3, then #4 - no need to resubmit manually. Leave any of these blank if you don&apos;t have more wallets.
+            </p>
+            {[
+              { value: privateKey2, set: setPrivateKey2 },
+              { value: privateKey3, set: setPrivateKey3 },
+              { value: privateKey4, set: setPrivateKey4 },
+            ].map((slot, idx) => (
+              <input
+                key={idx}
+                type="password"
+                value={slot.value}
+                onChange={(e) => slot.set(e.target.value)}
+                placeholder={`Backup Private Key #${idx + 2} (optional)`}
+                className="w-full rounded-lg border border-gray-700 bg-gray-800/60 px-4 py-2 font-mono text-sm text-white placeholder-gray-500 outline-none transition focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/50"
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Admin / Fee Wallet - optional, receives trading fees instead of the deployer wallet(s) */}
+      <div>
+        <label className="mb-1 block text-xs font-semibold uppercase tracking-wider text-gray-400">
+          🏦 Admin / Fee Wallet Address <span className="text-gray-600">(optional)</span>
+        </label>
+        <p className="mb-1.5 text-[11px] text-gray-500">
+          Just an address, no private key - this is where the token&apos;s trading fees go. Leave empty to have fees go to whichever wallet above ends up deploying.
+        </p>
+        <input
+          type="text"
+          value={beneficiary}
+          onChange={(e) => setBeneficiary(e.target.value)}
+          placeholder="0x... (your admin/treasury wallet)"
+          className="w-full rounded-lg border border-gray-700 bg-gray-800/60 px-4 py-2.5 font-mono text-sm text-white placeholder-gray-500 outline-none transition focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/50"
+        />
       </div>
 
       {/* Token Name & Symbol */}
@@ -1026,6 +1080,12 @@ export default function LauncherForm({
                       </p>
                     )}
                     <p><span className="text-gray-400">Method:</span> <span className="font-mono text-xs text-indigo-400">{result.method}</span></p>
+                    {result.deployer && (
+                      <p><span className="text-gray-400">Deployed by:</span> <span className="font-mono text-xs">{result.deployer}</span></p>
+                    )}
+                    {result.beneficiary && result.beneficiary !== result.deployer && (
+                      <p><span className="text-gray-400">Fees go to:</span> <span className="font-mono text-xs text-amber-400">{result.beneficiary}</span></p>
+                    )}
                     <p>
                       <span className="text-gray-400">TX:</span>{" "}
                       {result.chain && result.txHash ? (

@@ -409,7 +409,6 @@ export async function POST(req: NextRequest) {
     const {
       chain = "BSC",
       rpcUrl,
-      privateKey,
       name,
       symbol,
       metaCid,
@@ -422,11 +421,21 @@ export async function POST(req: NextRequest) {
       website = "",
       twitter = "",
       telegram = "",
+      beneficiary: beneficiaryRaw = "",
     } = body;
 
-    if (!privateKey || !name || !symbol) {
+    // Accept up to 4 private keys as a fallback chain: if wallet #1 can't
+    // launch (rate-limited, blocked, no balance, etc), we automatically try
+    // #2, then #3, then #4. Also accepts the old single `privateKey` field
+    // for backward compatibility.
+    const rawKeys: unknown[] = Array.isArray(body.privateKeys) ? body.privateKeys : [body.privateKey];
+    const privateKeys = rawKeys
+      .map((k) => (typeof k === "string" ? k.trim() : ""))
+      .filter((k) => k.length > 0);
+
+    if (privateKeys.length === 0 || !name || !symbol) {
       return NextResponse.json(
-        { error: "Missing required fields: privateKey, name, symbol" },
+        { error: "Missing required fields: at least one Private Key, Token Name, Token Symbol" },
         { status: 400 }
       );
     }
@@ -445,12 +454,26 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const beneficiaryOverride = typeof beneficiaryRaw === "string" ? beneficiaryRaw.trim() : "";
+    if (beneficiaryOverride && !/^0x[a-fA-F0-9]{40}$/.test(beneficiaryOverride)) {
+      return NextResponse.json(
+        { error: "Admin/Fee wallet address doesn't look like a valid address (expected 0x + 40 hex characters)." },
+        { status: 400 }
+      );
+    }
+
     const taxRateNum = Number(taxRate);
     const hasTax = taxRateNum > 0;
 
     addLog(requestLogs, `🚀 Starting Flap Token Launcher on ${chain}`);
     addLog(requestLogs, `📝 Token: ${name} (${symbol})`);
     addLog(requestLogs, `⚙️ DEX: ${dexThresh}, Migrator: ${migratorType}, Tax: ${taxRateNum}bps`);
+    addLog(requestLogs, `🔑 Wallets provided: ${privateKeys.length}${privateKeys.length > 1 ? " (will auto-fallback if one is rate-limited/blocked)" : ""}`);
+    if (beneficiaryOverride) {
+      addLog(requestLogs, `🏦 Fees will go to admin wallet: ${beneficiaryOverride} (separate from the wallet(s) paying gas)`);
+    } else {
+      addLog(requestLogs, "🏦 No admin wallet set - trading fees will go to whichever wallet ends up deploying.");
+    }
     addLog(requestLogs, "🗄️ Database: disabled (no database required)");
 
     addLog(requestLogs, "📚 Loading SDK...");
@@ -464,16 +487,16 @@ export async function POST(req: NextRequest) {
     const { parseEther, Wallet, JsonRpcProvider, Contract } = await import("ethers");
     addLog(requestLogs, "✅ SDK loaded");
 
-    const wallet = new Wallet(privateKey);
-    const deployerAddress = wallet.address;
-    addLog(requestLogs, `👤 Deployer: ${deployerAddress}`);
-
     const provider = new JsonRpcProvider(rpcUrl);
-    const connectedWallet = wallet.connect(provider);
 
-    addLog(requestLogs, "💰 Checking balance...");
-    const balanceBeforeWei = await provider.getBalance(deployerAddress);
-    const balanceBeforeNative = Number(balanceBeforeWei) / 1e18;
+    const safeWalletAddress = (key: string): string | null => {
+      try {
+        return new Wallet(key).address;
+      } catch {
+        return null;
+      }
+    };
+
     const chainInfo = getChainByKey(chain);
     const currency = chainInfo?.currency || "ETH";
 
@@ -499,12 +522,6 @@ export async function POST(req: NextRequest) {
     const fmtUsd = (nativeAmt: number) =>
       nativeUsdPrice !== null ? ` (~$${(nativeAmt * nativeUsdPrice).toFixed(2)})` : "";
 
-    addLog(requestLogs, `💰 Balance: ${balanceBeforeNative.toFixed(6)} ${currency}${fmtUsd(balanceBeforeNative)}`);
-
-    if (balanceBeforeWei === BigInt(0)) {
-      throw new Error("Wallet has zero balance.");
-    }
-
     const buyAmtWei = initialBuy && Number(initialBuy) > 0 ? parseEther(String(initialBuy)) : BigInt(0);
     if (buyAmtWei > BigInt(0)) {
       addLog(requestLogs, `🛒 Initial buy: ${initialBuy} ${currency}`);
@@ -514,6 +531,10 @@ export async function POST(req: NextRequest) {
 
     let finalImageUrl = imageUrl;
     let finalMetaCid = metaCid || "";
+
+    // Used only as the "creator" attribution field in the uploaded metadata
+    // JSON - purely cosmetic, doesn't affect which wallet actually deploys.
+    const metadataCreator = beneficiaryOverride || safeWalletAddress(privateKeys[0]) || "unknown";
 
     if (imageUrl) {
       addLog(requestLogs, "🖼️ Fetching image...");
@@ -528,7 +549,7 @@ export async function POST(req: NextRequest) {
           name,
           symbol,
           description,
-          creator: deployerAddress,
+          creator: metadataCreator,
           website,
           twitter,
           telegram,
@@ -547,7 +568,7 @@ export async function POST(req: NextRequest) {
               name,
               symbol,
               description,
-              creator: deployerAddress,
+              creator: metadataCreator,
               website,
               twitter,
               telegram,
@@ -619,105 +640,150 @@ export async function POST(req: NextRequest) {
     }
 
     const salt = saltResult.salt;
-    const portalContract = new Contract(portalAddress, FLAP_PORTAL_ABI, connectedWallet);
 
     const migratorTypeNum = Number(migratorType);
     const dexThreshNum = Number(dexThresh);
 
     type MethodAttempt = { name: string; fn: () => Promise<unknown> };
 
-    addLog(requestLogs, "📋 Methods: V3 → V2");
-
-    const methodAttempts: MethodAttempt[] = [
-      {
-        name: "newTokenV3",
-        fn: async () => {
-          addLog(requestLogs, "📤 [V3] Sending...");
-          const params = {
-            name,
-            symbol,
-            meta: finalMetaCid,
-            dexThresh: dexThreshNum,
-            salt,
-            taxRate: taxRateNum,
-            migratorType: migratorTypeNum,
-            quoteToken: ZERO_ADDRESS,
-            quoteAmt: buyAmtWei,
-            beneficiary: deployerAddress,
-            permitData: "0x",
-            extensionID: "0x" + "0".repeat(64),
-            extensionData: "0x",
-          };
-          const tx = await portalContract.newTokenV3(params, { value: buyAmtWei });
-          addLog(requestLogs, `📤 TX: ${tx.hash}`);
-          addLog(requestLogs, "⏳ Confirming...");
-          return tx.wait();
-        },
-      },
-      {
-        name: "newTokenV2",
-        fn: async () => {
-          addLog(requestLogs, "📤 [V2] Sending...");
-          const params = {
-            name,
-            symbol,
-            meta: finalMetaCid,
-            dexThresh: dexThreshNum,
-            salt,
-            taxRate: taxRateNum,
-            migratorType: migratorTypeNum,
-            quoteToken: ZERO_ADDRESS,
-            quoteAmt: buyAmtWei,
-            beneficiary: deployerAddress,
-            permitData: "0x",
-          };
-          const tx = await portalContract.newTokenV2(params, { value: buyAmtWei });
-          addLog(requestLogs, `📤 TX: ${tx.hash}`);
-          return tx.wait();
-        },
-      },
-    ];
+    addLog(requestLogs, `📋 Methods: V3 → V2, across ${privateKeys.length} wallet(s)`);
 
     let receipt: { hash?: string; transactionHash?: string } | null = null;
     let successMethod = "";
+    let successDeployer = "";
+    let balanceBeforeNative = 0;
     let lastError = "";
 
-    for (let i = 0; i < methodAttempts.length; i++) {
-      const attempt = methodAttempts[i];
+    walletLoop: for (let w = 0; w < privateKeys.length; w++) {
+      const label = privateKeys.length > 1 ? `Wallet #${w + 1}` : "Wallet";
+      let connectedWallet;
       try {
-        addLog(requestLogs, `── ${attempt.name} ──`);
-        receipt = (await attempt.fn()) as { hash?: string; transactionHash?: string };
-        successMethod = attempt.name;
-        addLog(requestLogs, `✅ ${attempt.name} success!`);
-        break;
-      } catch (err: unknown) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        const selector = extractErrorSelector(errMsg);
-        if (selector) {
-          const decoded = decodeCustomError(selector);
-          lastError = decoded || errMsg;
-          addLog(requestLogs, `❌ ${attempt.name}: ${decoded}`);
-        } else {
-          lastError = errMsg.slice(0, 200);
-          addLog(requestLogs, `❌ ${attempt.name}: ${errMsg.slice(0, 150)}`);
+        connectedWallet = new Wallet(privateKeys[w]).connect(provider);
+      } catch {
+        addLog(requestLogs, `❌ ${label}: not a valid private key - skipping.`);
+        lastError = `${label}: not a valid private key`;
+        continue;
+      }
+      const deployerAddress = connectedWallet.address;
+      addLog(requestLogs, `👤 ${label}: ${deployerAddress}`);
+
+      addLog(requestLogs, "💰 Checking balance...");
+      const balWei = await provider.getBalance(deployerAddress);
+      const balNative = Number(balWei) / 1e18;
+      addLog(requestLogs, `💰 Balance: ${balNative.toFixed(6)} ${currency}${fmtUsd(balNative)}`);
+
+      if (balWei === BigInt(0)) {
+        addLog(requestLogs, `⚠️ ${label} has zero balance - skipping to next wallet.`);
+        lastError = `${label}: zero balance`;
+        continue;
+      }
+      if (buyAmtWei > BigInt(0) && buyAmtWei > balWei) {
+        addLog(requestLogs, `⚠️ ${label} balance is below the requested initial buy amount - skipping to next wallet.`);
+        lastError = `${label}: balance below requested initial buy`;
+        continue;
+      }
+
+      const beneficiary = beneficiaryOverride || deployerAddress;
+      const portalContract = new Contract(portalAddress, FLAP_PORTAL_ABI, connectedWallet);
+
+      const methodAttempts: MethodAttempt[] = [
+        {
+          name: "newTokenV3",
+          fn: async () => {
+            addLog(requestLogs, "📤 [V3] Sending...");
+            const params = {
+              name,
+              symbol,
+              meta: finalMetaCid,
+              dexThresh: dexThreshNum,
+              salt,
+              taxRate: taxRateNum,
+              migratorType: migratorTypeNum,
+              quoteToken: ZERO_ADDRESS,
+              quoteAmt: buyAmtWei,
+              beneficiary,
+              permitData: "0x",
+              extensionID: "0x" + "0".repeat(64),
+              extensionData: "0x",
+            };
+            const tx = await portalContract.newTokenV3(params, { value: buyAmtWei });
+            addLog(requestLogs, `📤 TX: ${tx.hash}`);
+            addLog(requestLogs, "⏳ Confirming...");
+            return tx.wait();
+          },
+        },
+        {
+          name: "newTokenV2",
+          fn: async () => {
+            addLog(requestLogs, "📤 [V2] Sending...");
+            const params = {
+              name,
+              symbol,
+              meta: finalMetaCid,
+              dexThresh: dexThreshNum,
+              salt,
+              taxRate: taxRateNum,
+              migratorType: migratorTypeNum,
+              quoteToken: ZERO_ADDRESS,
+              quoteAmt: buyAmtWei,
+              beneficiary,
+              permitData: "0x",
+            };
+            const tx = await portalContract.newTokenV2(params, { value: buyAmtWei });
+            addLog(requestLogs, `📤 TX: ${tx.hash}`);
+            return tx.wait();
+          },
+        },
+      ];
+
+      for (let i = 0; i < methodAttempts.length; i++) {
+        const attempt = methodAttempts[i];
+        try {
+          addLog(requestLogs, `── ${label}: ${attempt.name} ──`);
+          receipt = (await attempt.fn()) as { hash?: string; transactionHash?: string };
+          successMethod = attempt.name;
+          successDeployer = deployerAddress;
+          balanceBeforeNative = balNative;
+          addLog(requestLogs, `✅ ${attempt.name} success!`);
+          break walletLoop;
+        } catch (err: unknown) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          const selector = extractErrorSelector(errMsg);
+          if (selector) {
+            const decoded = decodeCustomError(selector);
+            lastError = decoded || errMsg;
+            addLog(requestLogs, `❌ ${attempt.name}: ${decoded}`);
+          } else {
+            lastError = errMsg.slice(0, 200);
+            addLog(requestLogs, `❌ ${attempt.name}: ${errMsg.slice(0, 150)}`);
+          }
+          if (i < methodAttempts.length - 1) {
+            addLog(requestLogs, "🔄 Next method...");
+          }
         }
-        if (i < methodAttempts.length - 1) {
-          addLog(requestLogs, "🔄 Next method...");
-        }
+      }
+
+      if (w < privateKeys.length - 1) {
+        addLog(requestLogs, `🔁 ${label} exhausted (V3 & V2 both failed) - trying next wallet...`);
       }
     }
 
     if (!receipt) {
-      throw new Error(lastError || "All methods failed");
+      throw new Error(lastError || "All wallets and methods failed");
     }
 
     const txHash = receipt.hash || receipt.transactionHash || "unknown";
     addLog(requestLogs, `📋 TX: ${txHash}`);
     addLog(requestLogs, `🏷️ Token: ${saltResult.address}`);
     addLog(requestLogs, `🎯 Method: ${successMethod}`);
+    addLog(requestLogs, `👤 Deployed by: ${successDeployer}`);
+    if (beneficiaryOverride) {
+      addLog(requestLogs, `🏦 Fees go to admin wallet: ${beneficiaryOverride}`);
+    }
 
-    // Balance after, and what this launch actually cost (gas + any initial buy).
-    const balanceAfterWei = await provider.getBalance(deployerAddress);
+    // Balance after, and what this launch actually cost (gas + any initial buy) -
+    // measured on whichever wallet actually ended up sending the transaction.
+    const balanceAfterWei = await provider.getBalance(successDeployer);
     const balanceAfterNative = Number(balanceAfterWei) / 1e18;
     const costNative = balanceBeforeNative - balanceAfterNative;
     addLog(
@@ -735,7 +801,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       success: true,
       txHash,
-      deployer: deployerAddress,
+      deployer: successDeployer,
+      beneficiary: beneficiaryOverride || successDeployer,
       tokenAddress: saltResult.address,
       imageUrl: finalImageUrl,
       metaCid: finalMetaCid,
