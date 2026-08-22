@@ -19,6 +19,15 @@ export interface ChainInfo {
    * in that case only the native-coin amount is shown, no USD conversion.
    */
   coingeckoId: string | null;
+  /**
+   * DexScreener's chainId slug for this chain (see https://api.dexscreener.com).
+   * Confirmed for BSC/Base/Ethereum/Arbitrum against DexScreener's own docs;
+   * XLayer/Morph/Monad are best-effort - if wrong, the Chinese Tokens
+   * dashboard just silently gets 0 results from DexScreener for that chain
+   * and still shows GeckoTerminal's results, so a wrong guess here degrades
+   * gracefully rather than breaking anything.
+   */
+  dexscreenerChainId: string | null;
 }
 
 export const SUPPORTED_CHAINS: ChainInfo[] = [
@@ -31,6 +40,7 @@ export const SUPPORTED_CHAINS: ChainInfo[] = [
     explorerTx: (h) => `https://bscscan.com/tx/${h}`,
     geckoNetwork: "bsc",
     coingeckoId: "binancecoin",
+    dexscreenerChainId: "bsc",
   },
   {
     key: "BASE",
@@ -41,6 +51,7 @@ export const SUPPORTED_CHAINS: ChainInfo[] = [
     explorerTx: (h) => `https://basescan.org/tx/${h}`,
     geckoNetwork: "base",
     coingeckoId: "ethereum",
+    dexscreenerChainId: "base",
   },
   {
     key: "ETHEREUM",
@@ -51,6 +62,7 @@ export const SUPPORTED_CHAINS: ChainInfo[] = [
     explorerTx: (h) => `https://etherscan.io/tx/${h}`,
     geckoNetwork: "eth",
     coingeckoId: "ethereum",
+    dexscreenerChainId: "ethereum",
   },
   {
     key: "ARBITRUM_ONE",
@@ -61,6 +73,7 @@ export const SUPPORTED_CHAINS: ChainInfo[] = [
     explorerTx: (h) => `https://arbiscan.io/tx/${h}`,
     geckoNetwork: "arbitrum",
     coingeckoId: "ethereum",
+    dexscreenerChainId: "arbitrum",
   },
   {
     key: "XLAYER",
@@ -71,6 +84,7 @@ export const SUPPORTED_CHAINS: ChainInfo[] = [
     explorerTx: (h) => `https://www.okx.com/explorer/xlayer/tx/${h}`,
     geckoNetwork: "x-layer",
     coingeckoId: "okb",
+    dexscreenerChainId: "xlayer",
   },
   {
     key: "MORPH",
@@ -81,6 +95,7 @@ export const SUPPORTED_CHAINS: ChainInfo[] = [
     explorerTx: (h) => `https://explorer.morphl2.io/tx/${h}`,
     geckoNetwork: "morph-l2",
     coingeckoId: "ethereum",
+    dexscreenerChainId: "morph",
   },
   {
     key: "MONAD",
@@ -95,6 +110,7 @@ export const SUPPORTED_CHAINS: ChainInfo[] = [
     // No established CoinGecko id yet for Monad's native MON coin as of writing -
     // leave null so the app shows the coin amount only, no fabricated USD figure.
     coingeckoId: null,
+    dexscreenerChainId: "monad",
   },
 ];
 

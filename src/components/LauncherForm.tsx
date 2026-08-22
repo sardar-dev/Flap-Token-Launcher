@@ -10,6 +10,7 @@ import {
 } from "@/lib/chains";
 import type { GeckoTokenData, TrendingTokenCard } from "@/lib/gecko-types";
 import { fetchAiFillToken, fetchTokenInfoByAddress, fetchTrendingTokens } from "@/lib/geckoterminal-client";
+import ChineseTokenDashboard from "@/components/ChineseTokenDashboard";
 
 interface LaunchResult {
   success: boolean;
@@ -209,6 +210,13 @@ export default function LauncherForm({
     setTwitter(token.twitter || "");
     setTelegram(token.telegram || "");
     setAiToken(token);
+  };
+
+  // Chinese Meme Tokens dashboard can surface a token on a different chain
+  // than the one currently selected - switch the form to match before filling.
+  const handleFillFromChineseDashboard = (token: GeckoTokenData, tokenChain: string) => {
+    if (chain !== tokenChain) setChain(tokenChain);
+    fillFormFromToken(token);
   };
 
   // --- Trending Memecoins dashboard ---
@@ -530,6 +538,9 @@ export default function LauncherForm({
           </div>
         )}
       </div>
+
+      {/* Chinese Meme Tokens Dashboard - own section, all Flap-supported chains */}
+      <ChineseTokenDashboard onFillToken={handleFillFromChineseDashboard} />
 
       <form onSubmit={handleSubmit} className="space-y-6">
       {/* Chain Selection */}
