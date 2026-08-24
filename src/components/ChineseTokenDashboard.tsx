@@ -18,6 +18,36 @@ interface ChineseTokenDashboardProps {
 
 const GECKO_CHAINS = SUPPORTED_CHAINS.filter((c) => c.geckoNetwork);
 
+// Fills in a real image for cards missing one, by looking up each token
+// individually (the same per-token lookup already used when a card is
+// clicked). Capped and run in small parallel batches to keep this fast and
+// avoid firing off dozens of requests at once.
+async function enrichMissingImages(cards: ChineseTokenCard[], limit: number): Promise<ChineseTokenCard[]> {
+  const missing = cards.filter((c) => !c.imageUrl).slice(0, limit);
+  if (missing.length === 0) return cards;
+
+  const CONCURRENCY = 6;
+  const foundImages = new Map<string, string>();
+
+  for (let i = 0; i < missing.length; i += CONCURRENCY) {
+    const batch = missing.slice(i, i + CONCURRENCY);
+    const settled = await Promise.allSettled(batch.map((c) => fetchTokenInfoByAddress(c.chain, c.address)));
+    settled.forEach((result, idx) => {
+      if (result.status === "fulfilled" && result.value.imageUrl) {
+        const key = `${batch[idx].chain}:${batch[idx].address.toLowerCase()}`;
+        foundImages.set(key, result.value.imageUrl);
+      }
+    });
+  }
+
+  if (foundImages.size === 0) return cards;
+  return cards.map((c) => {
+    const key = `${c.chain}:${c.address.toLowerCase()}`;
+    const found = foundImages.get(key);
+    return found ? { ...c, imageUrl: found } : c;
+  });
+}
+
 export default function ChineseTokenDashboard({ onFillToken }: ChineseTokenDashboardProps) {
   // --- Filters ---
   const [chainFilter, setChainFilter] = useState("ALL");
@@ -114,7 +144,17 @@ export default function ChineseTokenDashboard({ onFillToken }: ChineseTokenDashb
       return a.ageDays - b.ageDays;
     });
 
-    setTokens(deduped.slice(0, 100));
+    const finalList = deduped.slice(0, 100);
+
+    // GeckoTerminal's list/search-level data very often has no image yet for
+    // newer tokens - the real image only reliably comes from looking up one
+    // token at a time (the same call already used when you click a card).
+    // Doing that for every result would be too many requests, so we only
+    // backfill it for the first batch actually shown, in small parallel
+    // groups so it doesn't add much wait time.
+    const enriched = await enrichMissingImages(finalList, 30);
+
+    setTokens(enriched);
     setSourceCounts({ gecko: deduped.filter((t) => t.source === "GeckoTerminal").length, dex: dexCount });
     setLoading(false);
     setFetchedOnce(true);
@@ -173,7 +213,7 @@ export default function ChineseTokenDashboard({ onFillToken }: ChineseTokenDashb
       </div>
 
       {/* Filters */}
-      <div className="mb-3 grid grid-cols-2 gap-2 rounded-lg border border-gray-800 bg-gray-950/40 p-3 sm:grid-cols-3 lg:grid-cols-6">
+      <div className="mb-3 grid grid-cols-1 gap-2 rounded-lg border border-gray-800 bg-gray-950/40 p-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6">
         <div>
           <label className="mb-1 block text-[10px] uppercase text-gray-500">Chain</label>
           <select
@@ -249,7 +289,7 @@ export default function ChineseTokenDashboard({ onFillToken }: ChineseTokenDashb
           />
         </div>
 
-        <div className="col-span-2 flex items-center gap-3 sm:col-span-3 lg:col-span-6">
+        <div className="col-span-1 flex flex-wrap items-center gap-3 sm:col-span-2 md:col-span-3 lg:col-span-6">
           <label className="flex items-center gap-1.5 text-xs text-gray-400">
             <input type="checkbox" checked={useGecko} onChange={(e) => setUseGecko(e.target.checked)} className="accent-indigo-500" />
             GeckoTerminal

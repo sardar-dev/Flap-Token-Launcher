@@ -11,6 +11,7 @@ import {
 import type { GeckoTokenData, TrendingTokenCard } from "@/lib/gecko-types";
 import { fetchAiFillToken, fetchTokenInfoByAddress, fetchTrendingTokens } from "@/lib/geckoterminal-client";
 import ChineseTokenDashboard from "@/components/ChineseTokenDashboard";
+import WalletBalanceChecker from "@/components/WalletBalanceChecker";
 
 interface LaunchResult {
   success: boolean;
@@ -155,6 +156,9 @@ export default function LauncherForm({
   // No server calls or requests of any kind - just a countdown timer running
   // in the browser that disables the Launch button until it reaches zero.
   const [cooldownUntil, setCooldownUntil] = useState<number | null>(null);
+  // Last wallet that successfully deployed - offered as a quick-fill in the
+  // Wallet Balance Checker below, never auto-applied over what's typed there.
+  const [lastDeployerAddress, setLastDeployerAddress] = useState<string | null>(null);
   const [cooldownRemaining, setCooldownRemaining] = useState(0);
 
   useEffect(() => {
@@ -353,6 +357,7 @@ export default function LauncherForm({
           txHash: data.txHash,
           timestamp: Date.now(),
         });
+        if (data.deployer) setLastDeployerAddress(data.deployer);
         setCooldownUntil(Date.now() + 30000);
         onLaunchComplete();
       } else {
@@ -369,6 +374,9 @@ export default function LauncherForm({
 
   return (
     <>
+      {/* Wallet Balance Checker - own section, works with any address or private key */}
+      <WalletBalanceChecker lastDeployerAddress={lastDeployerAddress} />
+
       {/* Launch History (browser only - nothing saved on the server) */}
       <div className="mb-4 flex items-center justify-between">
         <button

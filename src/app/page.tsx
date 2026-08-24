@@ -81,7 +81,7 @@ export default function HomePage() {
       </header>
 
       {/* Main Content */}
-      <main className="mx-auto max-w-4xl px-4 pb-16 sm:px-6 lg:px-8">
+      <main className="mx-auto max-w-6xl px-4 pb-16 sm:px-6 lg:px-8">
         {/* Launcher Form */}
         <section aria-label="Token Launch Form">
           <div className="rounded-2xl border border-gray-800 bg-gray-900/80 p-6 shadow-2xl backdrop-blur-sm sm:p-8">
@@ -96,78 +96,6 @@ export default function HomePage() {
             <LauncherForm
               onLaunchComplete={() => setLaunchCount((c) => c + 1)}
             />
-          </div>
-        </section>
-
-        {/* SEO Feature Cards */}
-        <section className="mt-16" aria-label="Features">
-          <h2 className="mb-8 text-center text-2xl font-bold text-white">
-            Why Use Flap Token Launcher?
-          </h2>
-          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
-            <article className="rounded-xl border border-gray-800 bg-gray-900/60 p-6">
-              <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-lg bg-indigo-500/10">
-                <span className="text-2xl">🔗</span>
-              </div>
-              <h3 className="text-lg font-semibold text-white">Multi-Chain Support</h3>
-              <p className="mt-2 text-sm leading-relaxed text-gray-400">
-                Deploy your token on <strong>BSC</strong>, <strong>Base</strong>, <strong>Ethereum</strong>,{" "}
-                <strong>Arbitrum</strong>, <strong>X Layer</strong>, <strong>Morph</strong>, and <strong>Monad</strong>{" "}
-                with a single unified interface.
-              </p>
-            </article>
-            
-            <article className="rounded-xl border border-gray-800 bg-gray-900/60 p-6">
-              <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-lg bg-purple-500/10">
-                <span className="text-2xl">📈</span>
-              </div>
-              <h3 className="text-lg font-semibold text-white">CDPV2 Bonding Curve</h3>
-              <p className="mt-2 text-sm leading-relaxed text-gray-400">
-                Flap Protocol uses an advanced <strong>bonding curve</strong> for fair price discovery.
-                Token price increases automatically as demand grows.
-              </p>
-            </article>
-            
-            <article className="rounded-xl border border-gray-800 bg-gray-900/60 p-6">
-              <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-lg bg-emerald-500/10">
-                <span className="text-2xl">⚡</span>
-              </div>
-              <h3 className="text-lg font-semibold text-white">Auto DEX Migration</h3>
-              <p className="mt-2 text-sm leading-relaxed text-gray-400">
-                When your token reaches the graduation threshold, it automatically migrates to{" "}
-                <strong>PancakeSwap V3</strong>, <strong>Uniswap</strong>, or other DEXes.
-              </p>
-            </article>
-            
-            <article className="rounded-xl border border-gray-800 bg-gray-900/60 p-6">
-              <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-lg bg-amber-500/10">
-                <span className="text-2xl">💸</span>
-              </div>
-              <h3 className="text-lg font-semibold text-white">Optional Tax Support</h3>
-              <p className="mt-2 text-sm leading-relaxed text-gray-400">
-                Configure buy/sell taxes in basis points. Set 0 for no tax, or up to 10000 (100%) for maximum.
-              </p>
-            </article>
-            
-            <article className="rounded-xl border border-gray-800 bg-gray-900/60 p-6">
-              <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-lg bg-violet-500/10">
-                <span className="text-2xl">🤖</span>
-              </div>
-              <h3 className="text-lg font-semibold text-white">AI-Powered Fill</h3>
-              <p className="mt-2 text-sm leading-relaxed text-gray-400">
-                One-click auto-fill from trending BSC tokens. Gets name, symbol, image, and metadata automatically.
-              </p>
-            </article>
-            
-            <article className="rounded-xl border border-gray-800 bg-gray-900/60 p-6">
-              <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-lg bg-cyan-500/10">
-                <span className="text-2xl">🖼️</span>
-              </div>
-              <h3 className="text-lg font-semibold text-white">Auto Image Upload</h3>
-              <p className="mt-2 text-sm leading-relaxed text-gray-400">
-                Token images are automatically uploaded to permanent hosting. No API keys or setup required.
-              </p>
-            </article>
           </div>
         </section>
 
@@ -218,7 +146,7 @@ export default function HomePage() {
             {" "}• No database required • No API keys needed
           </p>
           <p className="mt-2 text-xs text-gray-600">
-            ⚠️ This tool handles private keys client-side. Use a dedicated deployment wallet.
+            ⚠️ Private keys are sent only to sign each transaction and are never saved. Use a dedicated deployment wallet.
           </p>
         </footer>
       </main>
