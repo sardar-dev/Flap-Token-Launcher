@@ -187,47 +187,65 @@ export async function fetchTokenInfoByAddress(chainKey: string, address: string)
 }
 
 /** Trending Memecoins dashboard: a batch of cards for one chain, Hot or New. */
-export async function fetchTrendingTokens(chainKey: string, mode: "hot" | "new"): Promise<TrendingTokenCard[]> {
+export async function fetchTrendingTokens(
+  chainKey: string,
+  mode: "hot" | "new",
+  maxPages: number = 1
+): Promise<TrendingTokenCard[]> {
   const chainInfo = getChainByKey(chainKey);
   if (!chainInfo?.geckoNetwork) {
     throw new Error(`Trending data isn't available for this chain yet.`);
   }
   const network = chainInfo.geckoNetwork;
-  const MAX_CARDS = 12;
+  const MAX_CARDS_PER_PAGE = 20;
 
   try {
-    const url =
-      mode === "hot"
-        ? `${GECKOTERMINAL_API_BASE}/networks/${network}/trending_pools?include=base_token`
-        : `${GECKOTERMINAL_API_BASE}/networks/${network}/new_pools?include=base_token&page=1`;
-
-    const res = await fetch(url, { headers: { Accept: "application/json" } });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-    const json = await res.json();
-    const pools: GeckoPool[] = json.data || [];
-    const included: GeckoToken[] = json.included || [];
-    const tokenMap = new Map<string, GeckoToken>();
-    for (const t of included) tokenMap.set(t.id, t);
-
     const now = Date.now();
     const cards: TrendingTokenCard[] = [];
-    for (const pool of pools.slice(0, MAX_CARDS)) {
-      const token = tokenMap.get(pool.relationships.base_token.data.id);
-      if (!token) continue;
-      const createdAt = pool.attributes.pool_created_at ? new Date(pool.attributes.pool_created_at).getTime() : now;
-      const ageDays = Math.max(0, Math.floor((now - createdAt) / (1000 * 60 * 60 * 24)));
-      cards.push({
-        address: token.attributes.address,
-        name: token.attributes.name,
-        symbol: token.attributes.symbol,
-        imageUrl: token.attributes.image_url || "",
-        priceUsd: parseFloat(pool.attributes.base_token_price_usd || "0"),
-        priceChange1h: parseFloat(pool.attributes.price_change_percentage?.h1 || "0"),
-        volume24h: parseFloat(pool.attributes.volume_usd?.h24 || "0"),
-        ageDays,
-        chain: chainInfo.key,
-      });
+
+    // "Hot" (trending_pools) isn't paginated the same way as "new" - always
+    // one call. "New" (new_pools) supports multiple pages, so scanning more
+    // of them surfaces far more candidates before any language/volume filter
+    // is applied - this is what the Chinese Tokens dashboard asks for via maxPages.
+    const pagesToFetch = mode === "hot" ? 1 : Math.max(1, maxPages);
+
+    for (let page = 1; page <= pagesToFetch; page++) {
+      const url =
+        mode === "hot"
+          ? `${GECKOTERMINAL_API_BASE}/networks/${network}/trending_pools?include=base_token`
+          : `${GECKOTERMINAL_API_BASE}/networks/${network}/new_pools?include=base_token&page=${page}`;
+
+      const res = await fetch(url, { headers: { Accept: "application/json" } });
+      if (!res.ok) {
+        if (page === 1) throw new Error(`HTTP ${res.status}`);
+        break; // later pages failing (e.g. ran past available pages) just stops the scan, keeps what we have
+      }
+
+      const json = await res.json();
+      const pools: GeckoPool[] = json.data || [];
+      if (pools.length === 0) break;
+
+      const included: GeckoToken[] = json.included || [];
+      const tokenMap = new Map<string, GeckoToken>();
+      for (const t of included) tokenMap.set(t.id, t);
+
+      for (const pool of pools.slice(0, MAX_CARDS_PER_PAGE)) {
+        const token = tokenMap.get(pool.relationships.base_token.data.id);
+        if (!token) continue;
+        const createdAt = pool.attributes.pool_created_at ? new Date(pool.attributes.pool_created_at).getTime() : now;
+        const ageDays = Math.max(0, Math.floor((now - createdAt) / (1000 * 60 * 60 * 24)));
+        cards.push({
+          address: token.attributes.address,
+          name: token.attributes.name,
+          symbol: token.attributes.symbol,
+          imageUrl: token.attributes.image_url || "",
+          priceUsd: parseFloat(pool.attributes.base_token_price_usd || "0"),
+          priceChange1h: parseFloat(pool.attributes.price_change_percentage?.h1 || "0"),
+          volume24h: parseFloat(pool.attributes.volume_usd?.h24 || "0"),
+          ageDays,
+          chain: chainInfo.key,
+        });
+      }
     }
     return cards;
   } catch {

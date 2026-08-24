@@ -10,12 +10,6 @@ import { containsChinese } from "@/lib/cjk";
 // slice of DexScreener's rate limit instead of sharing the server's.
 const DEXSCREENER_BASE = "https://api.dexscreener.com";
 
-interface DexTokenProfile {
-  chainId: string;
-  tokenAddress: string;
-  icon?: string;
-}
-
 interface DexPairToken {
   address: string;
   name?: string;
@@ -32,19 +26,31 @@ interface DexPair {
   info?: { imageUrl?: string };
 }
 
+interface DexSearchResponse {
+  pairs?: DexPair[];
+}
+
 function chainKeyForDexscreenerId(dsChainId: string): string | null {
   const match = SUPPORTED_CHAINS.find((c) => c.dexscreenerChainId === dsChainId);
   return match ? match.key : null;
 }
 
+// Common Chinese words/characters used in meme/crypto token names and
+// symbols - zodiac animals, "coin"/"currency", luck/wealth words, and common
+// bull-market slang. DexScreener's search matches substrings of token name
+// and symbol, so searching these directly finds Chinese-named tokens instead
+// of hoping they happen to appear in a general trending/new list.
+const CHINESE_SEARCH_KEYWORDS = [
+  "币", "龙", "牛", "狗", "猫", "虎", "兔", "鸡", "猪", "马",
+  "涨", "赚", "发财", "福", "财", "金", "银", "旺", "牛市", "神",
+];
+
 /**
- * Scans DexScreener's latest token profiles (a real-time feed of newly
- * promoted tokens), keeps only ones on the given chains, looks up each
- * candidate's actual name/symbol/price, and returns only the ones whose
- * name or symbol contains Chinese characters.
- *
- * Two-step because DexScreener's profile feed doesn't include name/symbol
- * directly - only after resolving the address do we know what to filter on.
+ * Searches DexScreener directly for Chinese meme-coin keywords (rather than
+ * filtering their small "paid profile" feed), one search call per keyword,
+ * keeps only pairs on the requested chains, and double-checks the actual
+ * name/symbol contains Chinese characters (a keyword match can occasionally
+ * land in unrelated fields).
  */
 export async function fetchDexScreenerChineseTokens(chainKeys: string[]): Promise<TrendingTokenCard[]> {
   const targetDsIds = new Set(
@@ -54,49 +60,35 @@ export async function fetchDexScreenerChineseTokens(chainKeys: string[]): Promis
   );
   if (targetDsIds.size === 0) return [];
 
-  let profiles: DexTokenProfile[] = [];
-  try {
-    const res = await fetch(`${DEXSCREENER_BASE}/token-profiles/latest/v1`, {
-      headers: { Accept: "application/json" },
-    });
-    if (!res.ok) return [];
-    const json = await res.json();
-    profiles = Array.isArray(json) ? json : [];
-  } catch {
-    return []; // DexScreener source unavailable - GeckoTerminal source still covers the dashboard
-  }
-
-  const candidates = profiles.filter((p) => p?.chainId && p?.tokenAddress && targetDsIds.has(p.chainId));
-  if (candidates.length === 0) return [];
-
-  // Group by chain (DexScreener's batch lookup is per-chain, up to 30 addresses)
-  const byChain = new Map<string, string[]>();
-  for (const c of candidates) {
-    const list = byChain.get(c.chainId) || [];
-    if (list.length < 30) list.push(c.tokenAddress);
-    byChain.set(c.chainId, list);
-  }
-
   const results: TrendingTokenCard[] = [];
+  const seen = new Set<string>();
   const now = Date.now();
 
-  for (const [dsChainId, addresses] of byChain.entries()) {
-    const chainKey = chainKeyForDexscreenerId(dsChainId);
-    if (!chainKey) continue;
+  for (const keyword of CHINESE_SEARCH_KEYWORDS) {
     try {
-      const res = await fetch(`${DEXSCREENER_BASE}/tokens/v1/${dsChainId}/${addresses.join(",")}`, {
+      const res = await fetch(`${DEXSCREENER_BASE}/latest/dex/search?q=${encodeURIComponent(keyword)}`, {
         headers: { Accept: "application/json" },
       });
       if (!res.ok) continue;
-      const pairs: DexPair[] = await res.json();
-      if (!Array.isArray(pairs)) continue;
+      const json: DexSearchResponse = await res.json();
+      const pairs = Array.isArray(json.pairs) ? json.pairs : [];
 
       for (const pair of pairs) {
+        if (!targetDsIds.has(pair.chainId)) continue;
+        const chainKey = chainKeyForDexscreenerId(pair.chainId);
+        if (!chainKey) continue;
+
         const name = pair.baseToken?.name || "";
         const symbol = pair.baseToken?.symbol || "";
         if (!containsChinese(name) && !containsChinese(symbol)) continue;
 
-        const ageDays = pair.pairCreatedAt ? Math.max(0, Math.floor((now - pair.pairCreatedAt) / (1000 * 60 * 60 * 24))) : 0;
+        const dedupeKey = `${chainKey}:${pair.baseToken.address.toLowerCase()}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+
+        const ageDays = pair.pairCreatedAt
+          ? Math.max(0, Math.floor((now - pair.pairCreatedAt) / (1000 * 60 * 60 * 24)))
+          : 0;
 
         results.push({
           address: pair.baseToken.address,
@@ -111,7 +103,7 @@ export async function fetchDexScreenerChineseTokens(chainKeys: string[]): Promis
         });
       }
     } catch {
-      // Skip this chain's DexScreener results on failure, keep going with the rest.
+      // Skip this keyword on failure, keep going with the rest.
       continue;
     }
   }

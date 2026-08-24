@@ -24,7 +24,7 @@ export default function ChineseTokenDashboard({ onFillToken }: ChineseTokenDashb
   const [useGecko, setUseGecko] = useState(true);
   const [useDexScreener, setUseDexScreener] = useState(true);
   const [geckoMode, setGeckoMode] = useState<"hot" | "new" | "both">("both");
-  const [minVolume, setMinVolume] = useState("100");
+  const [minVolume, setMinVolume] = useState("0");
   const [maxAgeDays, setMaxAgeDays] = useState("");
   const [sortBy, setSortBy] = useState<"volume" | "change" | "newest">("volume");
   const [searchText, setSearchText] = useState("");
@@ -56,7 +56,11 @@ export default function ChineseTokenDashboard({ onFillToken }: ChineseTokenDashb
       for (const c of chainsToScan) {
         for (const m of modes) {
           try {
-            const list = await fetchTrendingTokens(c.key, m);
+            // "New" pools get a deeper multi-page scan since Chinese-named
+            // tokens are a small slice of all tokens and rarely make just
+            // the first page - "Hot" pools aren't paginated the same way,
+            // so maxPages only matters for "new" (see fetchTrendingTokens).
+            const list = await fetchTrendingTokens(c.key, m, m === "new" ? 5 : 1);
             for (const t of list) {
               if (containsChinese(t.name) || containsChinese(t.symbol)) {
                 combined.push({ ...t, source: "GeckoTerminal" });
@@ -110,7 +114,7 @@ export default function ChineseTokenDashboard({ onFillToken }: ChineseTokenDashb
       return a.ageDays - b.ageDays;
     });
 
-    setTokens(deduped.slice(0, 40));
+    setTokens(deduped.slice(0, 100));
     setSourceCounts({ gecko: deduped.filter((t) => t.source === "GeckoTerminal").length, dex: dexCount });
     setLoading(false);
     setFetchedOnce(true);
@@ -268,7 +272,7 @@ export default function ChineseTokenDashboard({ onFillToken }: ChineseTokenDashb
 
       {!fetchedOnce && !loading && !error && (
         <p className="rounded-md border border-dashed border-gray-800 px-3 py-4 text-center text-xs text-gray-500">
-          Press &quot;Scan for Chinese Tokens&quot; to load results - scanning all chains and both sources in one click can take a few seconds, and nothing is fetched until you ask for it.
+          Press &quot;Scan for Chinese Tokens&quot; to load results - this now does a deeper scan (multiple pages per chain, plus keyword search on DexScreener) for better coverage, so scanning all chains and both sources in one click can take 10-20 seconds. Nothing is fetched until you ask for it.
         </p>
       )}
 
