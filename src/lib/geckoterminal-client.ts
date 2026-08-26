@@ -255,3 +255,65 @@ export async function fetchTrendingTokens(
     return data.tokens || [];
   }
 }
+
+/**
+ * Fills in missing images for a batch of token cards using GeckoTerminal's
+ * tokens/multi endpoint (up to 30 addresses per call, per chain) — one request
+ * per chain instead of one request per token. Much faster and cheaper than the
+ * previous approach of calling /info per token individually.
+ */
+export async function batchEnrichImages<T extends { chain: string; address: string; imageUrl: string }>(
+  cards: T[]
+): Promise<T[]> {
+  if (cards.length === 0) return cards;
+
+  // Group cards by chain (tokens/multi is per-network).
+  const byChain = new Map<string, T[]>();
+  for (const card of cards) {
+    const list = byChain.get(card.chain) || [];
+    list.push(card);
+    byChain.set(card.chain, list);
+  }
+
+  const imageMap = new Map<string, string>(); // chain:address.lower -> imageUrl
+
+  await Promise.allSettled(
+    Array.from(byChain.entries()).map(async ([chainKey, chainCards]) => {
+      const chainInfo = getChainByKey(chainKey);
+      if (!chainInfo?.geckoNetwork) return;
+      const network = chainInfo.geckoNetwork;
+
+      // Process in batches of 30 (API max), still in parallel per batch.
+      const BATCH = 30;
+      await Promise.allSettled(
+        Array.from({ length: Math.ceil(chainCards.length / BATCH) }, (_, i) =>
+          chainCards.slice(i * BATCH, i * BATCH + BATCH)
+        ).map(async (batch) => {
+          const addresses = batch.map((c) => c.address).join(",");
+          const res = await fetch(
+            `${GECKOTERMINAL_API_BASE}/networks/${network}/tokens/multi/${addresses}`,
+            { headers: { Accept: "application/json" } }
+          );
+          if (!res.ok) return;
+          const json = await res.json();
+          const items: Array<{ attributes: { address: string; image_url?: string | null } }> =
+            json.data || [];
+          for (const item of items) {
+            const img = item.attributes.image_url;
+            if (img) {
+              imageMap.set(`${chainKey}:${item.attributes.address.toLowerCase()}`, img);
+            }
+          }
+        })
+      );
+    })
+  );
+
+  if (imageMap.size === 0) return cards;
+
+  return cards.map((c) => {
+    if (c.imageUrl) return c; // already has one, keep it
+    const found = imageMap.get(`${c.chain}:${c.address.toLowerCase()}`);
+    return found ? { ...c, imageUrl: found } : c;
+  });
+}

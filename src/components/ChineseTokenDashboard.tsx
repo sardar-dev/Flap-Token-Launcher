@@ -4,7 +4,7 @@ import { useState, useMemo } from "react";
 import Image from "next/image";
 import { SUPPORTED_CHAINS, getChainByKey } from "@/lib/chains";
 import type { GeckoTokenData, TrendingTokenCard } from "@/lib/gecko-types";
-import { fetchTrendingTokens, fetchTokenInfoByAddress } from "@/lib/geckoterminal-client";
+import { fetchTrendingTokens, fetchTokenInfoByAddress, batchEnrichImages } from "@/lib/geckoterminal-client";
 import { fetchDexScreenerChineseTokens } from "@/lib/dexscreener-client";
 import { containsChinese } from "@/lib/cjk";
 
@@ -18,34 +18,12 @@ interface ChineseTokenDashboardProps {
 
 const GECKO_CHAINS = SUPPORTED_CHAINS.filter((c) => c.geckoNetwork);
 
-// Fills in a real image for cards missing one, by looking up each token
-// individually (the same per-token lookup already used when a card is
-// clicked). Capped and run in small parallel batches to keep this fast and
-// avoid firing off dozens of requests at once.
+// Replaced: per-token /info calls (slow, 1 req each) →
+// batchEnrichImages uses tokens/multi (up to 30 per call, much faster).
+// Kept as a thin wrapper so the call site is unchanged.
 async function enrichMissingImages(cards: ChineseTokenCard[], limit: number): Promise<ChineseTokenCard[]> {
-  const missing = cards.filter((c) => !c.imageUrl).slice(0, limit);
-  if (missing.length === 0) return cards;
-
-  const CONCURRENCY = 6;
-  const foundImages = new Map<string, string>();
-
-  for (let i = 0; i < missing.length; i += CONCURRENCY) {
-    const batch = missing.slice(i, i + CONCURRENCY);
-    const settled = await Promise.allSettled(batch.map((c) => fetchTokenInfoByAddress(c.chain, c.address)));
-    settled.forEach((result, idx) => {
-      if (result.status === "fulfilled" && result.value.imageUrl) {
-        const key = `${batch[idx].chain}:${batch[idx].address.toLowerCase()}`;
-        foundImages.set(key, result.value.imageUrl);
-      }
-    });
-  }
-
-  if (foundImages.size === 0) return cards;
-  return cards.map((c) => {
-    const key = `${c.chain}:${c.address.toLowerCase()}`;
-    const found = foundImages.get(key);
-    return found ? { ...c, imageUrl: found } : c;
-  });
+  const toEnrich = cards.slice(0, limit);
+  return batchEnrichImages(toEnrich);
 }
 
 export default function ChineseTokenDashboard({ onFillToken }: ChineseTokenDashboardProps) {
@@ -81,45 +59,49 @@ export default function ChineseTokenDashboard({ onFillToken }: ChineseTokenDashb
 
     const combined: ChineseTokenCard[] = [];
 
-    if (useGecko) {
-      const modes: Array<"hot" | "new"> = geckoMode === "both" ? ["hot", "new"] : [geckoMode];
-      for (const c of chainsToScan) {
-        for (const m of modes) {
-          try {
-            // "New" pools get a deeper multi-page scan since Chinese-named
-            // tokens are a small slice of all tokens and rarely make just
-            // the first page - "Hot" pools aren't paginated the same way,
-            // so maxPages only matters for "new" (see fetchTrendingTokens).
-            const list = await fetchTrendingTokens(c.key, m, m === "new" ? 5 : 1);
-            for (const t of list) {
-              if (containsChinese(t.name) || containsChinese(t.symbol)) {
-                combined.push({ ...t, source: "GeckoTerminal" });
-              }
-            }
-          } catch {
-            // Skip this chain/mode on failure, keep scanning the rest.
-          }
-        }
-      }
-    }
-
-    let dexCount = 0;
-    if (useDexScreener) {
-      try {
-        const list = await fetchDexScreenerChineseTokens(chainsToScan.map((c) => c.key));
-        dexCount = list.length;
-        for (const t of list) combined.push({ ...t, source: "DexScreener" });
-      } catch {
-        // DexScreener source unavailable this round - GeckoTerminal results (if any) still show.
-      }
-    }
-
     if (!useGecko && !useDexScreener) {
       setError("Turn on at least one source (GeckoTerminal or DexScreener).");
       setLoading(false);
       setFetchedOnce(true);
       return;
     }
+
+    // --- GeckoTerminal and DexScreener run fully in parallel ---
+    // All chains also scan in parallel within each source (previously sequential,
+    // so 7 chains × 2 modes × 5 pages ran one after another - now they all start
+    // at once and the slowest chain decides the total wait, not the sum).
+
+    const modes: Array<"hot" | "new"> = useGecko
+      ? (geckoMode === "both" ? ["hot", "new"] : [geckoMode])
+      : [];
+
+    const geckoTasks = chainsToScan.flatMap((c) =>
+      modes.map((m) =>
+        fetchTrendingTokens(c.key, m, m === "new" ? 5 : 1)
+          .then((list) =>
+            list
+              .filter((t) => containsChinese(t.name) || containsChinese(t.symbol))
+              .map((t): ChineseTokenCard => ({ ...t, source: "GeckoTerminal" as const }))
+          )
+          .catch(() => [] as ChineseTokenCard[])
+      )
+    );
+
+    const dexTask = useDexScreener
+      ? fetchDexScreenerChineseTokens(chainsToScan.map((c) => c.key))
+          .then((list) => list.map((t): ChineseTokenCard => ({ ...t, source: "DexScreener" as const })))
+          .catch(() => [] as ChineseTokenCard[])
+      : Promise.resolve([] as ChineseTokenCard[]);
+
+    const [geckoResults, dexResults] = await Promise.all([
+      Promise.all(geckoTasks),
+      dexTask,
+    ]);
+
+    for (const batch of geckoResults) combined.push(...batch);
+    const dexList = dexResults;
+    const dexCount = dexList.length;
+    combined.push(...dexList);
 
     // De-duplicate by chain+address (the same token can surface from both sources)
     const seen = new Set<string>();

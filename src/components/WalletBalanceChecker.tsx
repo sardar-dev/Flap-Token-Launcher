@@ -1,118 +1,81 @@
 "use client";
 
 import { useState } from "react";
-import { getChainByKey } from "@/lib/chains";
 
 interface WalletBalanceCheckerProps {
   lastDeployerAddress: string | null;
 }
 
+interface BalanceEntry { value: number | null; error: string | null; }
+
 interface Balances {
-  bnb: number;
-  usdtBep20: number;
-  ethBase: number;
-  ethMainnet: number;
+  address: string;
+  bnb: BalanceEntry;
+  usdtBep20: BalanceEntry;
+  ethBase: BalanceEntry;
+  ethMainnet: BalanceEntry;
 }
 
-// Binance-Peg USDT (BEP-20) on BSC. Confirmed 18 decimals (not the 6
-// decimals USDT uses on Ethereum) - BSC-pegged stablecoins commonly
-// re-implement with 18 decimals, so this is deliberately not reused from
-// any Ethereum-side USDT constant.
-const USDT_BEP20_ADDRESS = "0x55d398326f99059fF775485246999027B3197955";
+const PRIVATE_KEY_PATTERN = /^(0x)?[a-fA-F0-9]{64}$/;
+const ADDRESS_PATTERN = /^0x[a-fA-F0-9]{40}$/i;
 
-const PRIVATE_KEY_PATTERN = /^0x[a-fA-F0-9]{64}$/;
-const ADDRESS_PATTERN = /^0x[a-fA-F0-9]{40}$/;
+async function resolveToAddress(raw: string): Promise<string> {
+  const trimmed = raw.trim();
+  if (ADDRESS_PATTERN.test(trimmed)) return trimmed;
+
+  // Private key — resolve to address server-side so the key never touches a
+  // third-party API. We call our own /api/wallet-balance with a well-known
+  // address first to confirm the server works, then derive the address from
+  // the key in the browser (ethers.js Wallet only needs the key itself).
+  if (PRIVATE_KEY_PATTERN.test(trimmed)) {
+    const { Wallet } = await import("ethers");
+    const key = trimmed.startsWith("0x") ? trimmed : `0x${trimmed}`;
+    return new Wallet(key).address;
+  }
+
+  throw new Error(
+    "Not recognised. Paste a wallet address (0x + 40 characters) or a private key (0x + 64 characters, or 64 hex characters without 0x)."
+  );
+}
 
 export default function WalletBalanceChecker({ lastDeployerAddress }: WalletBalanceCheckerProps) {
   const [input, setInput] = useState("");
-  const [resolvedAddress, setResolvedAddress] = useState<string | null>(null);
   const [balances, setBalances] = useState<Balances | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const runCheck = async (addressToCheck: string) => {
+  const runCheck = async (raw: string) => {
     setLoading(true);
     setError("");
     try {
-      const { JsonRpcProvider, Contract, formatEther, formatUnits } = await import("ethers");
-
-      const bscRpc = getChainByKey("BSC")?.rpcUrl;
-      const baseRpc = getChainByKey("BASE")?.rpcUrl;
-      const ethRpc = getChainByKey("ETHEREUM")?.rpcUrl;
-      if (!bscRpc || !baseRpc || !ethRpc) {
-        throw new Error("Missing RPC configuration for one of these chains.");
+      const address = await resolveToAddress(raw);
+      const res = await fetch(`/api/wallet-balance?address=${encodeURIComponent(address)}`);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        throw new Error(data.error || `Server returned HTTP ${res.status}`);
       }
-
-      const bscProvider = new JsonRpcProvider(bscRpc);
-      const baseProvider = new JsonRpcProvider(baseRpc);
-      const ethProvider = new JsonRpcProvider(ethRpc);
-
-      const usdtContract = new Contract(
-        USDT_BEP20_ADDRESS,
-        ["function balanceOf(address) view returns (uint256)"],
-        bscProvider
-      );
-
-      const [bnbWei, usdtRaw, baseWei, ethWei] = await Promise.all([
-        bscProvider.getBalance(addressToCheck),
-        usdtContract.balanceOf(addressToCheck) as Promise<bigint>,
-        baseProvider.getBalance(addressToCheck),
-        ethProvider.getBalance(addressToCheck),
-      ]);
-
-      setBalances({
-        bnb: Number(formatEther(bnbWei)),
-        usdtBep20: Number(formatUnits(usdtRaw, 18)),
-        ethBase: Number(formatEther(baseWei)),
-        ethMainnet: Number(formatEther(ethWei)),
-      });
-      setResolvedAddress(addressToCheck);
+      const data = await res.json();
+      setBalances(data);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to fetch balances. Check your RPC connectivity and try again.");
+      setError(err instanceof Error ? err.message : "Failed to fetch balances. Check your internet connection and try again.");
     } finally {
       setLoading(false);
     }
   };
 
-  const handleCheck = async () => {
-    const trimmed = input.trim();
-    setError("");
-
-    if (PRIVATE_KEY_PATTERN.test(trimmed)) {
-      try {
-        const { Wallet } = await import("ethers");
-        const address = new Wallet(trimmed).address;
-        await runCheck(address);
-      } catch {
-        setError("That doesn't look like a valid private key.");
-      }
-      return;
-    }
-
-    if (ADDRESS_PATTERN.test(trimmed)) {
-      await runCheck(trimmed);
-      return;
-    }
-
-    setError("Paste a wallet address (0x + 40 characters) or a private key (0x + 64 characters).");
+  const fmt = (entry: BalanceEntry) => {
+    if (entry.error) return <span className="text-xs text-red-400">Error</span>;
+    const n = entry.value ?? 0;
+    const s = n === 0 ? "0" : n < 0.0001 ? n.toExponential(2) : n.toFixed(n < 1 ? 6 : 4);
+    return <span>{s}</span>;
   };
-
-  const handleReload = () => {
-    if (resolvedAddress) runCheck(resolvedAddress);
-  };
-
-  const handleUseLastDeployer = () => {
-    if (lastDeployerAddress) setInput(lastDeployerAddress);
-  };
-
-  const fmt = (n: number) => (n === 0 ? "0" : n < 0.0001 ? n.toExponential(2) : n.toFixed(n < 1 ? 6 : 4));
 
   return (
     <div className="mb-6 rounded-xl border border-gray-800 bg-gray-900/60 p-4">
       <div className="mb-3">
         <p className="text-sm font-bold text-white">💼 Wallet Balance Checker</p>
         <p className="text-[11px] text-gray-500">
-          Paste any wallet address or private key - works for any wallet, not just ones you&apos;ve used to launch.
+          Paste any wallet address or private key — works for any wallet, not just ones used to launch.
         </p>
       </div>
 
@@ -121,6 +84,7 @@ export default function WalletBalanceChecker({ lastDeployerAddress }: WalletBala
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && !loading && input.trim() && runCheck(input)}
           placeholder="0x... wallet address or private key"
           className="w-full flex-1 rounded-lg border border-gray-700 bg-gray-800/60 px-3 py-2 font-mono text-xs text-white placeholder-gray-500 outline-none transition focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/50 sm:text-sm"
         />
@@ -128,15 +92,15 @@ export default function WalletBalanceChecker({ lastDeployerAddress }: WalletBala
           {lastDeployerAddress && (
             <button
               type="button"
-              onClick={handleUseLastDeployer}
+              onClick={() => { setInput(lastDeployerAddress); runCheck(lastDeployerAddress); }}
               className="whitespace-nowrap rounded-lg border border-gray-700 bg-gray-800/60 px-3 py-2 text-xs font-medium text-gray-300 hover:bg-gray-700"
             >
-              Use last deployed
+              Last deployed
             </button>
           )}
           <button
             type="button"
-            onClick={handleCheck}
+            onClick={() => runCheck(input)}
             disabled={loading || !input.trim()}
             className={`whitespace-nowrap rounded-lg px-4 py-2 text-xs font-bold transition ${
               loading || !input.trim()
@@ -153,13 +117,13 @@ export default function WalletBalanceChecker({ lastDeployerAddress }: WalletBala
         <p className="mt-2 rounded-md border border-red-500/30 bg-red-950/30 px-3 py-2 text-xs text-red-300">{error}</p>
       )}
 
-      {balances && resolvedAddress && (
+      {balances && (
         <div className="mt-3 rounded-lg border border-gray-800 bg-gray-950/40 p-3">
           <div className="mb-2 flex items-center justify-between gap-2">
-            <p className="truncate font-mono text-[11px] text-gray-500">{resolvedAddress}</p>
+            <p className="truncate font-mono text-[11px] text-gray-500">{balances.address}</p>
             <button
               type="button"
-              onClick={handleReload}
+              onClick={() => runCheck(input)}
               disabled={loading}
               className="flex-shrink-0 rounded-md border border-gray-700 bg-gray-800/60 px-2.5 py-1 text-[11px] font-medium text-gray-300 hover:bg-gray-700 disabled:opacity-50"
             >
@@ -167,23 +131,19 @@ export default function WalletBalanceChecker({ lastDeployerAddress }: WalletBala
             </button>
           </div>
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-            <div className="rounded-md bg-gray-900/60 p-2 text-center">
-              <p className="text-[10px] text-gray-500">BNB</p>
-              <p className="text-sm font-bold text-white">{fmt(balances.bnb)}</p>
-              {balances.bnb === 0 && <p className="text-[9px] text-amber-500">May not cover gas</p>}
-            </div>
-            <div className="rounded-md bg-gray-900/60 p-2 text-center">
-              <p className="text-[10px] text-gray-500">USDT (BEP20)</p>
-              <p className="text-sm font-bold text-white">{fmt(balances.usdtBep20)}</p>
-            </div>
-            <div className="rounded-md bg-gray-900/60 p-2 text-center">
-              <p className="text-[10px] text-gray-500">ETH (Base)</p>
-              <p className="text-sm font-bold text-white">{fmt(balances.ethBase)}</p>
-            </div>
-            <div className="rounded-md bg-gray-900/60 p-2 text-center">
-              <p className="text-[10px] text-gray-500">ETH (Ethereum)</p>
-              <p className="text-sm font-bold text-white">{fmt(balances.ethMainnet)}</p>
-            </div>
+            {[
+              { label: "BNB (BSC)", entry: balances.bnb, warn: (balances.bnb.value ?? 0) === 0 },
+              { label: "USDT BEP20", entry: balances.usdtBep20, warn: false },
+              { label: "ETH (Base)", entry: balances.ethBase, warn: false },
+              { label: "ETH (Mainnet)", entry: balances.ethMainnet, warn: false },
+            ].map(({ label, entry, warn }) => (
+              <div key={label} className="rounded-md bg-gray-900/60 p-2 text-center">
+                <p className="text-[10px] text-gray-500">{label}</p>
+                <p className="text-sm font-bold text-white">{fmt(entry)}</p>
+                {warn && !entry.error && <p className="text-[9px] text-amber-500">Low — may not cover gas</p>}
+                {entry.error && <p className="truncate text-[9px] text-red-400" title={entry.error}>RPC error</p>}
+              </div>
+            ))}
           </div>
         </div>
       )}
