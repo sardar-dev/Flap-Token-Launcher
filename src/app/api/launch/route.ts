@@ -644,9 +644,32 @@ export async function POST(req: NextRequest) {
     const migratorTypeNum = Number(migratorType);
     const dexThreshNum = Number(dexThresh);
 
+    // -----------------------------------------------------------------------
+    // ABI fragments for current Portal entry points.
+    // FLAP_PORTAL_ABI from the SDK covers the legacy methods (V2/V3/V4) but
+    // may not include newTokenV6. We define the V6 fragment explicitly so we
+    // are not dependent on the SDK version shipping the correct ABI.
+    //
+    // Source: https://docs.flap.sh/flap/developers/token-launcher-developers/launch-token-through-portal
+    //
+    // Per the live Flap docs (fetched during this fix):
+    //   Current entry points: newTokenV6 (all token types), newTokenV7 (CL/PCS Infinity only)
+    //   Legacy (may be disabled on some deployments): newTokenV2, newTokenV3, newTokenV4, newTokenV5
+    //   The BSC live contract currently has V2 and V3 disabled (FeatureDisabled error selector
+    //   0xac5f6092) — newTokenV6 is the correct call.
+    // -----------------------------------------------------------------------
+    const NEW_TOKEN_V6_ABI_FRAGMENT = [
+      "function newTokenV6((string name, string symbol, string meta, uint8 dexThresh, bytes32 salt, uint8 migratorType, address quoteToken, uint256 quoteAmt, address beneficiary, bytes permitData, bytes32 extensionID, bytes extensionData, uint8 dexId, uint8 lpFeeProfile, uint16 buyTaxRate, uint16 sellTaxRate, uint64 taxDuration, uint64 antiFarmerDuration, uint16 mktBps, uint16 deflationBps, uint16 dividendBps, uint16 lpBps, uint256 minimumShareBalance, address dividendToken, address commissionReceiver, uint8 tokenVersion)) external payable returns (address)",
+    ];
+
+    // TokenVersion enum values from the Portal interface:
+    const TOKEN_V2_PERMIT = 2;   // Standard ERC-20 (non-tax)
+    const TOKEN_TAXED_V3 = 6;    // Recommended tax token (asymmetric rates, commissions)
+    const ZERO_BYTES32 = "0x" + "0".repeat(64);
+
     type MethodAttempt = { name: string; fn: () => Promise<unknown> };
 
-    addLog(requestLogs, `📋 Methods: V3 → V2, across ${privateKeys.length} wallet(s)`);
+    addLog(requestLogs, `📋 Methods: V6 → V3 → V2, across ${privateKeys.length} wallet(s)`);
 
     let receipt: { hash?: string; transactionHash?: string } | null = null;
     let successMethod = "";
@@ -684,10 +707,66 @@ export async function POST(req: NextRequest) {
       }
 
       const beneficiary = beneficiaryOverride || deployerAddress;
-      const portalContract = new Contract(portalAddress, FLAP_PORTAL_ABI, connectedWallet);
+
+      // Two contract instances:
+      //  - v6Contract: uses the explicit V6 ABI fragment (current entry point)
+      //  - legacyContract: uses the SDK's bundled ABI (covers V2/V3 as legacy fallbacks)
+      const v6Contract = new Contract(portalAddress, NEW_TOKEN_V6_ABI_FRAGMENT, connectedWallet);
+      const legacyContract = new Contract(portalAddress, FLAP_PORTAL_ABI, connectedWallet);
 
       const methodAttempts: MethodAttempt[] = [
         {
+          // ── PRIMARY: newTokenV6 ──────────────────────────────────────────
+          // Current recommended entry point per Flap's live docs.
+          // Handles both standard tokens (TOKEN_V2_PERMIT, all tax fields = 0)
+          // and tax tokens (TOKEN_TAXED_V3, mktBps = 10000 = all to beneficiary).
+          // Tax distribution constraints from docs:
+          //   mktBps + deflationBps + dividendBps + lpBps MUST equal 10000
+          // When using TOKEN_TAXED_V3 with mktBps = 10000, all collected tax
+          // (after protocol fee) goes to the beneficiary address.
+          name: "newTokenV6",
+          fn: async () => {
+            addLog(requestLogs, "📤 [V6] Sending...");
+            const tokenVersion = hasTax ? TOKEN_TAXED_V3 : TOKEN_V2_PERMIT;
+            const params = {
+              name,
+              symbol,
+              meta: finalMetaCid,
+              dexThresh: dexThreshNum,
+              salt,
+              migratorType: migratorTypeNum,
+              quoteToken: ZERO_ADDRESS,
+              quoteAmt: buyAmtWei,
+              beneficiary,
+              permitData: "0x",
+              extensionID: ZERO_BYTES32,
+              extensionData: "0x",
+              dexId: 0,            // DEX0 (PancakeSwap on BSC)
+              lpFeeProfile: 0,     // LP_FEE_PROFILE_STANDARD
+              buyTaxRate: taxRateNum,
+              sellTaxRate: taxRateNum,
+              taxDuration: hasTax ? BigInt(365 * 24 * 60 * 60) : BigInt(0),
+              antiFarmerDuration: hasTax ? BigInt(60 * 60) : BigInt(0),
+              mktBps: hasTax ? 10000 : 0,
+              deflationBps: 0,
+              dividendBps: 0,
+              lpBps: 0,
+              minimumShareBalance: BigInt(0),
+              dividendToken: ZERO_ADDRESS,
+              commissionReceiver: ZERO_ADDRESS,
+              tokenVersion,
+            };
+            const tx = await v6Contract.newTokenV6(params, { value: buyAmtWei });
+            addLog(requestLogs, `📤 TX: ${tx.hash}`);
+            addLog(requestLogs, "⏳ Confirming...");
+            return tx.wait();
+          },
+        },
+        {
+          // ── FALLBACK 1: newTokenV3 ───────────────────────────────────────
+          // Legacy - documented as still available for backward compatibility,
+          // but currently disabled (FeatureDisabled) on the BSC live contract.
+          // Kept here in case it re-enables or works on other chain deployments.
           name: "newTokenV3",
           fn: async () => {
             addLog(requestLogs, "📤 [V3] Sending...");
@@ -703,16 +782,19 @@ export async function POST(req: NextRequest) {
               quoteAmt: buyAmtWei,
               beneficiary,
               permitData: "0x",
-              extensionID: "0x" + "0".repeat(64),
+              extensionID: ZERO_BYTES32,
               extensionData: "0x",
             };
-            const tx = await portalContract.newTokenV3(params, { value: buyAmtWei });
+            const tx = await legacyContract.newTokenV3(params, { value: buyAmtWei });
             addLog(requestLogs, `📤 TX: ${tx.hash}`);
             addLog(requestLogs, "⏳ Confirming...");
             return tx.wait();
           },
         },
         {
+          // ── FALLBACK 2: newTokenV2 ───────────────────────────────────────
+          // Oldest legacy method - currently disabled on BSC live contract.
+          // Kept as last resort.
           name: "newTokenV2",
           fn: async () => {
             addLog(requestLogs, "📤 [V2] Sending...");
@@ -729,7 +811,7 @@ export async function POST(req: NextRequest) {
               beneficiary,
               permitData: "0x",
             };
-            const tx = await portalContract.newTokenV2(params, { value: buyAmtWei });
+            const tx = await legacyContract.newTokenV2(params, { value: buyAmtWei });
             addLog(requestLogs, `📤 TX: ${tx.hash}`);
             return tx.wait();
           },
@@ -764,7 +846,7 @@ export async function POST(req: NextRequest) {
       }
 
       if (w < privateKeys.length - 1) {
-        addLog(requestLogs, `🔁 ${label} exhausted (V3 & V2 both failed) - trying next wallet...`);
+        addLog(requestLogs, `🔁 ${label} exhausted (V6/V3/V2 all failed) - trying next wallet...`);
       }
     }
 
