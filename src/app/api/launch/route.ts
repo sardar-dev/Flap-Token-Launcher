@@ -481,10 +481,8 @@ export async function POST(req: NextRequest) {
       FLAP_PORTAL_ABI,
       ZERO_ADDRESS,
       ADDRESSES,
-      findSaltEndingByChain,
-      getVanitySuffix,
     } = await import("four-flap-meme-sdk");
-    const { parseEther, Wallet, JsonRpcProvider, Contract } = await import("ethers");
+    const { parseEther, Wallet, JsonRpcProvider, Contract, keccak256, getCreate2Address } = await import("ethers");
     addLog(requestLogs, "✅ SDK loaded");
 
     const provider = new JsonRpcProvider(rpcUrl);
@@ -621,19 +619,100 @@ export async function POST(req: NextRequest) {
     const portalAddress = (chainAddresses as { FlapPortal: string }).FlapPortal;
     addLog(requestLogs, `📍 Portal: ${portalAddress}`);
 
-    const vanitySuffix = getVanitySuffix(chain, hasTax);
+    // -----------------------------------------------------------------------
+    // Token implementation addresses (from https://docs.flap.sh/flap/developers/deployed-contract-addresses)
+    // The CREATE2 address depends entirely on which impl is used as the clone base.
+    // The SDK's findSaltEndingByChain uses the old V1/V2 impl → wrong address for newTokenV6+TOKEN_TAXED_V3.
+    // We compute salts ourselves using the correct impl per token type and chain.
+    // -----------------------------------------------------------------------
+    const TOKEN_IMPLS: Record<string, { standard: string; tax: string; standardSuffix: string; taxSuffix: string }> = {
+      BSC: {
+        standard: "0x8b4329947e34b6d56d71a3385cac122bade7d78d", // Standard Token Impl (TOKEN_V2_PERMIT) → suffix 8888
+        tax:      "0x024f18294970B5c76c0691b87f138A0317156422", // Tax Token V3 Impl (TOKEN_TAXED_V3) → suffix 7777
+        standardSuffix: "8888",
+        taxSuffix: "7777",
+      },
+      ETHEREUM: {
+        standard: "0x8b4329947e34b6d56d71a3385cac122bade7d78d",
+        tax:      "0x024f18294970B5c76c0691b87f138A0317156422",
+        standardSuffix: "8888",
+        taxSuffix: "7777",
+      },
+      BASE: {
+        standard: "0x8b4329947e34b6d56d71a3385cac122bade7d78d",
+        tax:      "0x024f18294970B5c76c0691b87f138A0317156422",
+        standardSuffix: "8888",
+        taxSuffix: "7777",
+      },
+      ARBITRUM_ONE: {
+        standard: "0x8b4329947e34b6d56d71a3385cac122bade7d78d",
+        tax:      "0x024f18294970B5c76c0691b87f138A0317156422",
+        standardSuffix: "8888",
+        taxSuffix: "7777",
+      },
+      XLAYER: {
+        standard: "0x12Dc83157Bf1cfCB8Db5952b3ba5bb56Cc38f8C9", // Standard Token Impl → suffix 1111
+        tax:      "0xa9918579C9eD0899eCc7e449B9c59916Fb89bAF1", // Tax Token V1 Impl → suffix 7777
+        standardSuffix: "1111",
+        taxSuffix: "7777",
+      },
+      MORPH: {
+        standard: "0x8b4329947e34b6d56d71a3385cac122bade7d78d",
+        tax:      "0x024f18294970B5c76c0691b87f138A0317156422",
+        standardSuffix: "8888",
+        taxSuffix: "7777",
+      },
+      MONAD: {
+        standard: "0xB88189aA1162850D75A1c1e16F837b7979994184", // Standard Token Impl → suffix 8888
+        tax:      "0x1C8847736521f5cD725dFB8f33c7c610826e7C42", // Tax Token V1 Impl → suffix 1111
+        standardSuffix: "8888",
+        taxSuffix: "1111",
+      },
+    };
+
+    const implConfig = TOKEN_IMPLS[chain] ?? TOKEN_IMPLS.BSC;
+    const tokenImpl = hasTax ? implConfig.tax : implConfig.standard;
+    const vanitySuffix = hasTax ? implConfig.taxSuffix : implConfig.standardSuffix;
+
+    // EIP-1167 minimal proxy clone init code — the same formula the Portal contract uses for CREATE2.
+    // Source: https://docs.flap.sh/flap/developers/token-launcher-developers/launch-token-through-portal#4-find-the-salt
+    const initCode = "0x3d602d80600a3d3981f3363d3d373d3d3d363d73"
+      + tokenImpl.slice(2).toLowerCase()
+      + "5af43d82803e903d91602b57fd5bf3";
+    const initCodeHash = keccak256(initCode);
+
+    function predictTokenAddress(saltHex: string): string {
+      return getCreate2Address(portalAddress, saltHex, initCodeHash);
+    }
+
     addLog(requestLogs, `🎯 Vanity suffix: ${vanitySuffix} (${hasTax ? "taxed" : "standard"})`);
+    addLog(requestLogs, `🔧 Using impl: ${tokenImpl}`);
     addLog(requestLogs, "🔑 Generating vanity salt (10-60 seconds)...");
 
-    let saltResult: { salt: string; address: string; iterations: number };
+    let saltResult!: { salt: string; address: string; iterations: number };
     try {
-      saltResult = await findSaltEndingByChain({
-        chain,
-        taxed: hasTax,
-        maxIterations: 1000000,
-      });
-      addLog(requestLogs, `✅ Salt found in ${saltResult.iterations} iterations`);
-      addLog(requestLogs, `🏷️ Token address: ${saltResult.address}`);
+      // Seed with a random 32-byte value, then iterate keccak256 (same pattern as the Flap docs example).
+      const { randomBytes } = await import("crypto");
+      let currentSalt = "0x" + randomBytes(32).toString("hex");
+      let iters = 0;
+      const MAX_ITERS = 2_000_000;
+      let found = false;
+
+      while (iters < MAX_ITERS) {
+        const addr = predictTokenAddress(currentSalt);
+        if (addr.toLowerCase().endsWith(vanitySuffix.toLowerCase())) {
+          saltResult = { salt: currentSalt, address: addr, iterations: iters };
+          found = true;
+          break;
+        }
+        currentSalt = keccak256(currentSalt);
+        iters++;
+      }
+
+      if (!found) throw new Error(`Could not find a salt with suffix ${vanitySuffix} in ${MAX_ITERS} iterations.`);
+
+      addLog(requestLogs, `✅ Salt found in ${saltResult!.iterations} iterations`);
+      addLog(requestLogs, `🏷️ Token address: ${saltResult!.address}`);
     } catch (saltErr) {
       addLog(requestLogs, `❌ Salt generation failed: ${saltErr instanceof Error ? saltErr.message : String(saltErr)}`);
       throw new Error("Could not generate vanity salt. Try again.");
