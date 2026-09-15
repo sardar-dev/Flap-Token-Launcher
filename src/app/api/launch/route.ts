@@ -628,25 +628,25 @@ export async function POST(req: NextRequest) {
     const TOKEN_IMPLS: Record<string, { standard: string; tax: string; standardSuffix: string; taxSuffix: string }> = {
       BSC: {
         standard: "0x8b4329947e34b6d56d71a3385cac122bade7d78d", // Standard Token Impl (TOKEN_V2_PERMIT) → suffix 8888
-        tax:      "0x024f18294970B5c76c0691b87f138A0317156422", // Tax Token V3 Impl (TOKEN_TAXED_V3) → suffix 7777
+        tax:      "0x29e6383F0ce68507b5A72a53c2B118a118332aA8", // Tax Token V1 Impl (TOKEN_TAXED) → suffix 7777 - cheaper than V3 (no Dividend contract)
         standardSuffix: "8888",
         taxSuffix: "7777",
       },
       ETHEREUM: {
         standard: "0x8b4329947e34b6d56d71a3385cac122bade7d78d",
-        tax:      "0x024f18294970B5c76c0691b87f138A0317156422",
+        tax:      "0x29e6383F0ce68507b5A72a53c2B118a118332aA8", // Tax Token V1 Impl (TOKEN_TAXED) → suffix 7777
         standardSuffix: "8888",
         taxSuffix: "7777",
       },
       BASE: {
         standard: "0x8b4329947e34b6d56d71a3385cac122bade7d78d",
-        tax:      "0x024f18294970B5c76c0691b87f138A0317156422",
+        tax:      "0x29e6383F0ce68507b5A72a53c2B118a118332aA8", // Tax Token V1 Impl (TOKEN_TAXED) → suffix 7777
         standardSuffix: "8888",
         taxSuffix: "7777",
       },
       ARBITRUM_ONE: {
         standard: "0x8b4329947e34b6d56d71a3385cac122bade7d78d",
-        tax:      "0x024f18294970B5c76c0691b87f138A0317156422",
+        tax:      "0x29e6383F0ce68507b5A72a53c2B118a118332aA8", // Tax Token V1 Impl (TOKEN_TAXED) → suffix 7777
         standardSuffix: "8888",
         taxSuffix: "7777",
       },
@@ -658,7 +658,7 @@ export async function POST(req: NextRequest) {
       },
       MORPH: {
         standard: "0x8b4329947e34b6d56d71a3385cac122bade7d78d",
-        tax:      "0x024f18294970B5c76c0691b87f138A0317156422",
+        tax:      "0x29e6383F0ce68507b5A72a53c2B118a118332aA8", // Tax Token V1 Impl (TOKEN_TAXED) → suffix 7777
         standardSuffix: "8888",
         taxSuffix: "7777",
       },
@@ -742,8 +742,10 @@ export async function POST(req: NextRequest) {
     ];
 
     // TokenVersion enum values from the Portal interface:
-    const TOKEN_V2_PERMIT = 2;   // Standard ERC-20 (non-tax)
-    const TOKEN_TAXED_V3 = 6;    // Recommended tax token (asymmetric rates, commissions)
+    const TOKEN_V2_PERMIT = 2;   // Standard ERC-20 (non-tax) - confirmed from SDK enum
+    const TOKEN_TAXED = 4;       // Tax Token V1 - simpler, no Dividend contract, same gas cost as old newTokenV3
+    // TOKEN_TAXED_V3 = 6 is the modern version but always deploys an extra Dividend contract
+    // which roughly triples gas cost (~$0.05 → $0.19). Use TOKEN_TAXED (V1) for basic tax tokens.
     const ZERO_BYTES32 = "0x" + "0".repeat(64);
 
     type MethodAttempt = { name: string; fn: () => Promise<unknown> };
@@ -798,15 +800,13 @@ export async function POST(req: NextRequest) {
           // ── PRIMARY: newTokenV6 ──────────────────────────────────────────
           // Current recommended entry point per Flap's live docs.
           // Handles both standard tokens (TOKEN_V2_PERMIT, all tax fields = 0)
-          // and tax tokens (TOKEN_TAXED_V3, mktBps = 10000 = all to beneficiary).
-          // Tax distribution constraints from docs:
-          //   mktBps + deflationBps + dividendBps + lpBps MUST equal 10000
-          // When using TOKEN_TAXED_V3 with mktBps = 10000, all collected tax
-          // (after protocol fee) goes to the beneficiary address.
+          // and tax tokens (TOKEN_TAXED/V1, mktBps = 10000 = all to beneficiary).
+          // TOKEN_TAXED V1 constraints: mktBps MUST be 10000, symmetric rates.
+          // Does NOT deploy a Dividend contract → same gas cost as old newTokenV3 (~$0.05).
           name: "newTokenV6",
           fn: async () => {
             addLog(requestLogs, "📤 [V6] Sending...");
-            const tokenVersion = hasTax ? TOKEN_TAXED_V3 : TOKEN_V2_PERMIT;
+            const tokenVersion = hasTax ? TOKEN_TAXED : TOKEN_V2_PERMIT;
             const params = {
               name,
               symbol,
